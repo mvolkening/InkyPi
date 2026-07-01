@@ -1,0 +1,72 @@
+{% extends "plugin.html" %}
+
+{% block content %}
+<div class="river-levels-map">
+  <img class="basemap" src="{{ basemap_data_uri }}" alt="Map background">
+
+  <div class="header-bar">
+    <div class="title">{{ title }}</div>
+    <div class="subtitle">Past {{ days }} day{{ 's' if days != 1 else '' }} &middot; Updated {{ last_refresh_time }}</div>
+  </div>
+
+  {% for station in stations %}
+  <div class="station-pin" style="left: {{ station.pin_left_pct }}%; top: {{ station.pin_top_pct }}%; background-color: {{ station.color }};"></div>
+  <div class="station-box" style="left: {{ station.box_left_pct }}%; top: {{ station.box_top_pct }}%; border-color: {{ station.color }};">
+    <div class="station-name">{{ station.name }}</div>
+    <div class="station-value-row">
+      <span class="station-value">{{ station.latest_value }}</span>
+      <span class="station-unit">{{ station.unit }}</span>
+      <span class="station-trend trend-{{ station.trend }}">
+        {%- if station.trend == 'rising' -%}&#9650;{%- elif station.trend == 'falling' -%}&#9660;{%- else -%}&#9644;{%- endif -%}
+      </span>
+    </div>
+    <div class="station-meta">as of {{ station.latest_time_str }}</div>
+    <canvas class="station-chart" width="138" height="22" data-values="{{ station.chart_values | tojson }}" data-color="{{ station.color }}"></canvas>
+  </div>
+  {% endfor %}
+
+  <div class="legend">
+    <span>Water Survey of Canada (ECCC) &middot; api.weather.gc.ca</span>
+    <span>Basemap &copy; OpenStreetMap contributors</span>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<script>
+  document.addEventListener('DOMContentLoaded', () => {
+    document.querySelectorAll('.station-chart').forEach((canvas) => {
+      const values = JSON.parse(canvas.dataset.values || '[]');
+      const color = canvas.dataset.color || '#1f78b4';
+      new Chart(canvas, {
+        type: 'line',
+        data: {
+          labels: values.map((_, i) => i),
+          datasets: [{
+            data: values,
+            borderColor: color,
+            borderWidth: 2,
+            pointRadius: 0,
+            fill: true,
+            backgroundColor: color + '33',
+            tension: 0.25,
+            spanGaps: true,
+          }],
+        },
+        options: {
+          animation: { duration: 0 },
+          responsive: false,
+          maintainAspectRatio: false,
+          scales: {
+            x: { display: false },
+            y: { display: false },
+          },
+          plugins: {
+            legend: { display: false },
+            tooltip: { enabled: false },
+          },
+        },
+      });
+    });
+  });
+</script>
+{% endblock %}

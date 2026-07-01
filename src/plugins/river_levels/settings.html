@@ -1,0 +1,140 @@
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+
+<div class="form-group">
+    <label class="form-label">Area: </label>
+    <div class="form-group">
+        <span id="areaSummary">No area selected yet.</span>
+    </div>
+    <button type="button" id="openMap" class="action-button compact">Select Area</button>
+    <input type="hidden" id="west" name="west" />
+    <input type="hidden" id="south" name="south" />
+    <input type="hidden" id="east" name="east" />
+    <input type="hidden" id="north" name="north" />
+</div>
+
+<div class="form-group">
+    <label for="days" class="form-label">Chart Range:</label>
+    <select id="days" name="days" class="form-input">
+        <option value="1">Past 24 hours</option>
+        <option value="3">Past 3 days</option>
+        <option value="7">Past 7 days</option>
+        <option value="14">Past 14 days</option>
+        <option value="30">Past 30 days</option>
+    </select>
+    <span title="Environment Canada's real-time feed only retains a rolling 30-day window, so this is the maximum available.">ⓘ</span>
+</div>
+
+<div class="form-group">
+    <label for="maxStations" class="form-label">Max Stations:</label>
+    <select id="maxStations" name="maxStations" class="form-input">
+        <option value="4">4</option>
+        <option value="6">6</option>
+        <option value="8">8</option>
+        <option value="10">10</option>
+        <option value="15">15</option>
+        <option value="20">20</option>
+    </select>
+    <span title="If more real-time stations than this are found in the selected area, the largest/most significant ones are kept.">ⓘ</span>
+</div>
+
+<div class="form-group">
+    <label for="metricMode" class="form-label">Measurement:</label>
+    <select id="metricMode" name="metricMode" class="form-input">
+        <option value="auto">Auto (Discharge if available, else Level)</option>
+        <option value="level">Water Level (m) only</option>
+        <option value="discharge">Discharge (m&sup3;/s) only</option>
+    </select>
+</div>
+
+<div class="form-group">
+    <label for="customTitle" class="form-label">Title:</label>
+    <input type="text" id="customTitle" name="customTitle" class="form-input" placeholder="River Levels" />
+</div>
+
+<div id="mapModal" class="modal">
+    <div class="modal-content">
+        <span class="close-button" onclick="closeModal('mapModal')">×</span>
+        <h2 id="modalTitle">Select Area</h2>
+        <div class="separator"></div>
+        <p style="font-size: 0.85em; margin-bottom: 8px;">Pan and zoom until the area you want is entirely within view, then click Save. Every real-time Environment Canada hydrometric station inside that view will be plotted. Data coverage is Canada-wide.</p>
+        <div id="map" style="width: 100%; height: 320px; margin: 10px 0px;"></div>
+        <button id="closeMap" type="button" class="action-button">Save</button>
+    </div>
+</div>
+
+<script>
+    document.addEventListener('DOMContentLoaded', () => {
+        const OSM_TILE_URL = 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
+        const $openMap = document.querySelector('#openMap');
+        const $closeMap = document.querySelector('#closeMap');
+        const $areaSummary = document.querySelector('#areaSummary');
+        const $west = document.querySelector('#west');
+        const $south = document.querySelector('#south');
+        const $east = document.querySelector('#east');
+        const $north = document.querySelector('#north');
+
+        let map;
+        let defaultCenter = [56, -106]; // Canada, where this data source has coverage
+        let defaultZoom = 4;
+
+        function updateAreaSummary() {
+            if ($west.value && $south.value && $east.value && $north.value) {
+                $areaSummary.textContent =
+                    `Lat ${(+$south.value).toFixed(2)} to ${(+$north.value).toFixed(2)}, ` +
+                    `Lon ${(+$west.value).toFixed(2)} to ${(+$east.value).toFixed(2)}`;
+            } else {
+                $areaSummary.textContent = 'No area selected yet.';
+            }
+        }
+
+        $openMap.addEventListener('click', () => {
+            openModal('mapModal');
+            setTimeout(() => {
+                if (!map) {
+                    let initialView = [defaultCenter, defaultZoom];
+                    map = L.map('map');
+                    L.tileLayer(OSM_TILE_URL, { attribution: '&copy; OpenStreetMap contributors' }).addTo(map);
+
+                    if ($west.value && $south.value && $east.value && $north.value) {
+                        map.fitBounds([
+                            [+$south.value, +$west.value],
+                            [+$north.value, +$east.value],
+                        ]);
+                    } else {
+                        map.setView(defaultCenter, defaultZoom);
+                    }
+                } else {
+                    map.invalidateSize();
+                }
+            }, 100);
+        });
+
+        $closeMap.addEventListener('click', () => {
+            const bounds = map.getBounds();
+            $west.value = bounds.getWest();
+            $south.value = bounds.getSouth();
+            $east.value = bounds.getEast();
+            $north.value = bounds.getNorth();
+            updateAreaSummary();
+            closeModal('mapModal');
+        });
+
+        if (loadPluginSettings) {
+            $west.value = pluginSettings.west || '';
+            $south.value = pluginSettings.south || '';
+            $east.value = pluginSettings.east || '';
+            $north.value = pluginSettings.north || '';
+            updateAreaSummary();
+
+            document.getElementById('days').value = pluginSettings.days || '7';
+            document.getElementById('maxStations').value = pluginSettings.maxStations || '8';
+            document.getElementById('metricMode').value = pluginSettings.metricMode || 'auto';
+            document.getElementById('customTitle').value = pluginSettings.customTitle || '';
+        } else {
+            document.getElementById('days').value = '7';
+            document.getElementById('maxStations').value = '8';
+            document.getElementById('metricMode').value = 'auto';
+        }
+    });
+</script>

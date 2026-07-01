@@ -39,6 +39,14 @@ This project uses various fonts and icons, each with specific licensing terms. B
 | <img src="../src/plugins/weather/icons/uvi.png" width="32" height="32"> |<a href="https://www.flaticon.com/free-icons/uv-index" title="uv index icons">Uv index icons created by Freepik - Flaticon</a>|
 | <img src="../src/plugins/weather/icons/visibility.png" width="32" height="32"> |<a href="https://www.flaticon.com/free-icons/observe" title="observe icons">Observe icons created by meaicon - Flaticon</a>|
 | <img src="../src/plugins/weather/icons/wind.png" width="32" height="32"> |<a href="https://www.flaticon.com/free-icons/wind" title="wind icons">Wind icons created by riajulislam - Flaticon</a>|
+| <img src="../src/plugins/river_levels/icon.png" width="32" height="32"> | Original icon created for this project |
+
+## Map & Hydrometric Data Sources (River Levels plugin)
+| Source | Usage | License / Policy |
+|---|---|---|
+| [OpenStreetMap](https://www.openstreetmap.org/copyright) tiles | Background map, stitched server-side into a static image | Data &copy; OpenStreetMap contributors, [ODbL](https://opendatacommons.org/licenses/odbl/); tile access governed by the [OSM Tile Usage Policy](https://operations.osmfoundation.org/policies/tiles/) &mdash; keep plugin refresh intervals infrequent (hourly or slower) |
+| [Environment and Climate Change Canada, Water Survey of Canada](https://api.weather.gc.ca/collections/hydrometric-realtime) hydrometric API | Real-time station list and water level/discharge readings | [Open Government Licence &ndash; Canada](https://open.canada.ca/en/open-government-licence-canada) |
+| [waterwaymap.org](https://waterwaymap.org) | Inspiration for the concept; not embedded directly since its live MapLibre/PMTiles rendering isn't compatible with this project's static-screenshot pipeline | N/A |
 
 ## Waveshare e-Paper
 This project includes Waveshare e-Paper display drivers licensed under an MIT license.

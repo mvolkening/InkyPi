@@ -1,0 +1,128 @@
+.river-levels-map {
+    position: relative;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    background-color: #aad3df;
+}
+
+.river-levels-map .basemap {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    display: block;
+}
+
+.header-bar {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 5;
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    padding: 6px 10px;
+    background: rgba(255, 255, 255, 0.88);
+    border-bottom: 1px solid rgba(0, 0, 0, 0.15);
+}
+
+.header-bar .title {
+    font-size: 20px;
+    font-weight: 700;
+    color: #111;
+}
+
+.header-bar .subtitle {
+    font-size: 12px;
+    color: #333;
+}
+
+.station-pin {
+    position: absolute;
+    width: 12px;
+    height: 12px;
+    margin-left: -6px;
+    margin-top: -6px;
+    border-radius: 50%;
+    border: 2px solid #ffffff;
+    box-shadow: 0 0 2px rgba(0, 0, 0, 0.7);
+    z-index: 4;
+}
+
+.station-box {
+    position: absolute;
+    width: 150px;
+    height: 74px;
+    z-index: 3;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    padding: 3px 6px;
+    background: rgba(255, 255, 255, 0.93);
+    border: 2px solid;
+    border-radius: 6px;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.45);
+}
+
+.station-name {
+    font-size: 10px;
+    font-weight: 700;
+    color: #111;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.station-value-row {
+    display: flex;
+    align-items: baseline;
+    gap: 4px;
+}
+
+.station-value {
+    font-size: 16px;
+    font-weight: 700;
+    color: #111;
+}
+
+.station-unit {
+    font-size: 10px;
+    color: #333;
+}
+
+.station-trend {
+    font-size: 10px;
+    margin-left: auto;
+}
+
+.trend-rising { color: #1a7a1a; }
+.trend-falling { color: #b3261e; }
+.trend-steady { color: #666; }
+
+.station-meta {
+    font-size: 9px;
+    color: #555;
+}
+
+.station-chart {
+    width: 138px;
+    height: 22px;
+    display: block;
+}
+
+.legend {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    z-index: 5;
+    display: flex;
+    justify-content: space-between;
+    padding: 3px 10px;
+    background: rgba(255, 255, 255, 0.85);
+    font-size: 10px;
+    color: #333;
+    border-top: 1px solid rgba(0, 0, 0, 0.12);
+}
