@@ -37,15 +37,18 @@ MAX_LAT = 85.05112878  # Web Mercator projection limit
 MAX_STATION_POINTS = 10000  # comfortably covers a full 30-day / 5-min-interval window
 CHART_TARGET_POINTS = 80
 
-CHART_BOX_WIDTH = 150
-CHART_BOX_HEIGHT = 74
+CHART_BOX_WIDTH = 300
+CHART_BOX_HEIGHT = 148
 
 MAX_WATERWAY_WAYS = 4000  # protects Overpass/render time for very large or dense areas
 STATION_WATERWAY_RADIUS_M = 350  # how far from a station to look for "its" waterway
-# A vivid, moderately saturated blue. Very dark/muted colors risk collapsing
-# to plain black once a 6-7 color e-ink panel quantizes the image, making
-# rivers blend into dithered map/text and effectively disappear.
-DEFAULT_RIVER_COLOR = "#1a73e8"
+# A deep, saturated navy. Confirmed on real ACeP/Spectra e-ink hardware: a
+# brighter "vivid" blue (#1a73e8) was tried first and rendered as a muddy
+# blend indistinguishable from the basemap, while this darker tone quantizes
+# cleanly to the panel's blue primary - reflective e-ink pigments tend to
+# reproduce deep saturated darks more faithfully than bright/light colors,
+# the opposite of an emissive LCD.
+DEFAULT_RIVER_COLOR = "#031f45"
 
 BASEMAP_GAMMA = 2.4
 GAMMA_LUT = [min(255, round(255 * ((i / 255) ** BASEMAP_GAMMA))) for i in range(256)]

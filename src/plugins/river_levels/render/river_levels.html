@@ -21,7 +21,7 @@
       </span>
     </div>
     <div class="station-meta">as of {{ station.latest_time_str }}</div>
-    <canvas class="station-chart" width="138" height="22" data-values="{{ station.chart_values | tojson }}" data-color="{{ station.color }}"></canvas>
+    <canvas class="station-chart" width="276" height="44" data-values="{{ station.chart_values | tojson }}" data-color="{{ station.color }}"></canvas>
   </div>
   {% endfor %}
 

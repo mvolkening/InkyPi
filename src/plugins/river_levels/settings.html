@@ -54,8 +54,8 @@
 
 <div class="form-group">
     <label for="riverColor" class="form-label">River Color:</label>
-    <input type="color" id="riverColor" name="riverColor" class="color-picker" value="#1a73e8" />
-    <span title="Rivers are drawn as bold lines in a single color since e-ink displays can't reproduce the subtle pale blues used by standard map tiles. Pick a vivid, saturated color - very dark or muted colors can collapse to plain black once your display's limited color palette is applied.">ⓘ</span>
+    <input type="color" id="riverColor" name="riverColor" class="color-picker" value="#031f45" />
+    <span title="Rivers are drawn as bold lines in a single color since e-ink displays can't reproduce the subtle pale blues used by standard map tiles. On reflective e-ink panels, deep/dark saturated colors tend to render more faithfully than bright or light ones - if a color looks washed out or blends into the map, try something darker rather than lighter.">ⓘ</span>
 </div>
 
 <div id="mapModal" class="modal">
@@ -183,12 +183,12 @@
             document.getElementById('maxStations').value = pluginSettings.maxStations || '8';
             document.getElementById('metricMode').value = pluginSettings.metricMode || 'auto';
             document.getElementById('customTitle').value = pluginSettings.customTitle || '';
-            document.getElementById('riverColor').value = pluginSettings.riverColor || '#1a73e8';
+            document.getElementById('riverColor').value = pluginSettings.riverColor || '#031f45';
         } else {
             document.getElementById('days').value = '7';
             document.getElementById('maxStations').value = '8';
             document.getElementById('metricMode').value = 'auto';
-            document.getElementById('riverColor').value = '#1a73e8';
+            document.getElementById('riverColor').value = '#031f45';
         }
     });
 </script>
