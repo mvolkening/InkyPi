@@ -35,8 +35,9 @@
 }
 
 .header-bar .subtitle {
-    font-size: 12px;
-    color: #333;
+    font-size: 14px;
+    font-weight: 700;
+    color: #111;
 }
 
 .station-pin {
@@ -89,21 +90,24 @@
 
 .station-unit {
     font-size: 18px;
-    color: #333;
+    font-weight: 700;
+    color: #111;
 }
 
 .station-trend {
     font-size: 18px;
+    font-weight: 700;
     margin-left: auto;
 }
 
 .trend-rising { color: #1a7a1a; }
 .trend-falling { color: #b3261e; }
-.trend-steady { color: #666; }
+.trend-steady { color: #333; }
 
 .station-meta {
     font-size: 16px;
-    color: #555;
+    font-weight: 700;
+    color: #111;
 }
 
 .station-chart {
@@ -122,7 +126,8 @@
     justify-content: space-between;
     padding: 3px 10px;
     background: rgba(255, 255, 255, 0.85);
-    font-size: 10px;
-    color: #333;
+    font-size: 11px;
+    font-weight: 700;
+    color: #111;
     border-top: 1px solid rgba(0, 0, 0, 0.12);
 }

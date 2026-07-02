@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytz
 import requests
-from PIL import Image, ImageDraw, ImageOps
+from PIL import Image, ImageDraw, ImageFilter, ImageOps
 
 from plugins.base_plugin.base_plugin import BasePlugin
 
@@ -367,7 +367,17 @@ class RiverLevels(BasePlugin):
         # reference "black" point and turned solid water areas jet black
         # instead of actually darkening the thin road/label ink.
         canvas = ImageOps.grayscale(canvas)
-        canvas = canvas.point(GAMMA_LUT).convert("RGB")
+        canvas = canvas.point(GAMMA_LUT)
+        # Roads, dashed boundaries, and small creeks are only 1-2px wide in the
+        # source tile - confirmed on hardware that even after darkening, lines
+        # that thin still don't survive e-ink dithering (only large filled
+        # areas like a lake, and thick strokes like the drawn rivers, do). A
+        # min-filter dilates dark pixels into their neighbours, thickening all
+        # of that fine linework by a couple of pixels without needing to know
+        # what it represents.
+        min_filter_size = 3 if dimensions[0] <= 1000 else 5
+        canvas = canvas.filter(ImageFilter.MinFilter(min_filter_size))
+        canvas = canvas.convert("RGB")
 
         return canvas, project
 
@@ -455,8 +465,8 @@ class RiverLevels(BasePlugin):
         # like lakes and high-contrast text survived). A wide white "casing"
         # drawn under a wide colored line creates a hard edge the dithering
         # can't erase, the same technique cartographic styles use for rivers.
-        line_width = max(6, round(14 * dimensions[0] / 800))
-        casing_width = line_width + max(4, round(8 * dimensions[0] / 800))
+        line_width = max(4, round(8 * dimensions[0] / 800))
+        casing_width = line_width + max(3, round(6 * dimensions[0] / 800))
 
         line_points = []
         for way in waterways:
