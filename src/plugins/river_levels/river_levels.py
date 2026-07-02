@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytz
 import requests
-from PIL import Image
+from PIL import Image, ImageDraw, ImageEnhance, ImageOps
 
 from plugins.base_plugin.base_plugin import BasePlugin
 
@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 STATIONS_URL = "https://api.weather.gc.ca/collections/hydrometric-stations/items"
 REALTIME_URL = "https://api.weather.gc.ca/collections/hydrometric-realtime/items"
 OSM_TILE_URL = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
+OVERPASS_URL = "https://overpass-api.de/api/interpreter"
 
 # OSM's tile usage policy requires a descriptive User-Agent identifying the app.
 # Refresh intervals should stay infrequent (e.g. hourly+) to stay within their
@@ -22,6 +23,7 @@ OSM_TILE_URL = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
 HEADERS = {"User-Agent": "InkyPi-RiverLevelsPlugin/1.0 (+https://github.com/fatihak/InkyPi)"}
 
 REQUEST_TIMEOUT = 15
+OVERPASS_TIMEOUT = 30
 
 TILE_SIZE = 256
 MIN_ZOOM = 2
@@ -34,10 +36,18 @@ CHART_TARGET_POINTS = 80
 CHART_BOX_WIDTH = 150
 CHART_BOX_HEIGHT = 74
 
+MAX_WATERWAY_WAYS = 4000  # protects Overpass/render time for very large or dense areas
+DEFAULT_RIVER_COLOR = "#0a3d67"
+
 STATION_COLORS = [
     "#1f78b4", "#e31a1c", "#33a02c", "#ff7f00",
     "#6a3d9a", "#b15928", "#a6cee3", "#fb9a99",
 ]
+
+# Waterway geometry for a given area never changes refresh-to-refresh, unlike the
+# water level readings, so it's cached in-process (keyed by rounded bbox) to avoid
+# re-querying the shared public Overpass API on every plugin refresh.
+_WATERWAY_CACHE = {}
 
 
 class RiverLevels(BasePlugin):
@@ -54,6 +64,7 @@ class RiverLevels(BasePlugin):
         if metric_mode not in ('auto', 'level', 'discharge'):
             metric_mode = 'auto'
         title = (settings.get('customTitle') or '').strip() or 'River Levels'
+        river_color = settings.get('riverColor') or DEFAULT_RIVER_COLOR
 
         dimensions = device_config.get_resolution()
         if device_config.get_config("orientation") == "vertical":
@@ -91,6 +102,12 @@ class RiverLevels(BasePlugin):
         except Exception as e:
             logger.error(f"Failed to build background map: {str(e)}")
             raise RuntimeError("Failed to retrieve background map tiles, please check logs.")
+
+        waterways = self.get_waterways(bbox)
+        if waterways:
+            self.draw_waterways(basemap, waterways, project, dimensions, river_color)
+        else:
+            logger.info("No waterway geometry drawn (Overpass lookup returned nothing or failed); showing basemap only.")
 
         width, height = dimensions
         pixel_positions = [project(station['longitude'], station['latitude']) for station in station_data]
@@ -312,6 +329,14 @@ class RiverLevels(BasePlugin):
             px, py = self.lonlat_to_pixel(lon, lat, zoom)
             return px - crop_left, py - crop_top
 
+        # Standard OSM tile colours are subtle (pale creams/blues) meant for
+        # full-colour LCDs. On a 6-7 colour e-ink panel they dither down to
+        # near-white and water becomes indistinguishable from land, so the
+        # basemap is muted to grayscale here and the actual river geometry is
+        # drawn on top afterwards in one bold, deliberate colour instead.
+        canvas = ImageOps.grayscale(canvas).convert("RGB")
+        canvas = ImageEnhance.Contrast(canvas).enhance(1.35)
+
         return canvas, project
 
     def fetch_tile(self, zoom, x, y):
@@ -325,6 +350,49 @@ class RiverLevels(BasePlugin):
         except Exception as e:
             logger.warning(f"Failed to fetch map tile {url}: {str(e)}")
             return None
+
+    def get_waterways(self, bbox):
+        cache_key = tuple(round(value, 3) for value in bbox)
+        if cache_key in _WATERWAY_CACHE:
+            return _WATERWAY_CACHE[cache_key]
+
+        west, south, east, north = bbox
+        query = (
+            "[out:json][timeout:25];"
+            f'way["waterway"~"^(river|stream|canal)$"]["name"]({south},{west},{north},{east});'
+            "out geom;"
+        )
+        try:
+            response = requests.post(OVERPASS_URL, data={"data": query}, headers=HEADERS, timeout=OVERPASS_TIMEOUT)
+            if not 200 <= response.status_code < 300:
+                logger.warning(f"Overpass waterway request failed with status {response.status_code}")
+                return []
+            elements = response.json().get("elements", [])
+        except Exception as e:
+            logger.warning(f"Failed to retrieve waterway geometry from Overpass: {str(e)}")
+            return []
+
+        ways = []
+        for element in elements[:MAX_WATERWAY_WAYS]:
+            geometry = element.get("geometry")
+            if not geometry:
+                continue
+            ways.append([(point["lon"], point["lat"]) for point in geometry])
+
+        if len(elements) > MAX_WATERWAY_WAYS:
+            logger.info(f"Overpass returned {len(elements)} waterway segments, drawing the first {MAX_WATERWAY_WAYS}.")
+
+        _WATERWAY_CACHE[cache_key] = ways
+        return ways
+
+    def draw_waterways(self, canvas, waterways, project, dimensions, color):
+        draw = ImageDraw.Draw(canvas)
+        line_width = max(2, round(4 * dimensions[0] / 800))
+        for way in waterways:
+            points = [project(lon, lat) for lon, lat in way]
+            if len(points) < 2:
+                continue
+            draw.line(points, fill=color, width=line_width, joint="curve")
 
     def layout_station_boxes(self, positions, dimensions):
         """Greedily place each station's chart box near its pin, picking whichever

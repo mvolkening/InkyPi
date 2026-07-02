@@ -52,6 +52,12 @@
     <input type="text" id="customTitle" name="customTitle" class="form-input" placeholder="River Levels" />
 </div>
 
+<div class="form-group">
+    <label for="riverColor" class="form-label">River Color:</label>
+    <input type="color" id="riverColor" name="riverColor" class="color-picker" value="#0a3d67" />
+    <span title="Rivers are drawn as bold lines in a single color since e-ink displays can't reproduce the subtle pale blues used by standard map tiles. Pick a color your display's palette renders as a clear, dark tone.">ⓘ</span>
+</div>
+
 <div id="mapModal" class="modal">
     <div class="modal-content">
         <span class="close-button" onclick="closeModal('mapModal')">×</span>
@@ -131,10 +137,12 @@
             document.getElementById('maxStations').value = pluginSettings.maxStations || '8';
             document.getElementById('metricMode').value = pluginSettings.metricMode || 'auto';
             document.getElementById('customTitle').value = pluginSettings.customTitle || '';
+            document.getElementById('riverColor').value = pluginSettings.riverColor || '#0a3d67';
         } else {
             document.getElementById('days').value = '7';
             document.getElementById('maxStations').value = '8';
             document.getElementById('metricMode').value = 'auto';
+            document.getElementById('riverColor').value = '#0a3d67';
         }
     });
 </script>
