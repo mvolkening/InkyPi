@@ -19,7 +19,14 @@ REALTIME_URL = "https://api.weather.gc.ca/collections/hydrometric-realtime/items
 # woodlots/landuse polygons - just streets, water outlines, and place labels,
 # which reads much more cleanly on a low-color-count e-ink panel.
 OSM_TILE_URL = "https://a.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png"
-OVERPASS_URL = "https://overpass-api.de/api/interpreter"
+# The main public Overpass instance returns 504 "server too busy" fairly
+# often under normal load, so a couple of alternates are tried in turn: the
+# operator's own load-balanced front-end, then an independent mirror.
+OVERPASS_URLS = [
+    "https://overpass-api.de/api/interpreter",
+    "https://lz4.overpass-api.de/api/interpreter",
+    "https://overpass.osm.ch/api/interpreter",
+]
 
 # Descriptive User-Agent per OSM/CARTO/Overpass usage policies. Refresh
 # intervals should stay infrequent (e.g. hourly+) to stay within their
@@ -373,10 +380,12 @@ class RiverLevels(BasePlugin):
         # that thin still don't survive e-ink dithering (only large filled
         # areas like a lake, and thick strokes like the drawn rivers, do). A
         # min-filter dilates dark pixels into their neighbours, thickening all
-        # of that fine linework by a couple of pixels without needing to know
-        # what it represents.
-        min_filter_size = 3 if dimensions[0] <= 1000 else 5
-        canvas = canvas.filter(ImageFilter.MinFilter(min_filter_size))
+        # of that fine linework without needing to know what it represents.
+        # A size-5 kernel at higher resolutions did this too aggressively -
+        # place-name lettering in the tiles thickened enough that adjacent
+        # characters started merging into each other - so this stays at the
+        # mildest useful size (3) regardless of target resolution.
+        canvas = canvas.filter(ImageFilter.MinFilter(3))
         canvas = canvas.convert("RGB")
 
         return canvas, project
@@ -448,15 +457,15 @@ class RiverLevels(BasePlugin):
         return ways
 
     def run_overpass_query(self, query):
-        try:
-            response = requests.post(OVERPASS_URL, data={"data": query}, headers=HEADERS, timeout=OVERPASS_TIMEOUT)
-            if not 200 <= response.status_code < 300:
-                logger.warning(f"Overpass request failed with status {response.status_code}")
-                return None
-            return response.json().get("elements", [])
-        except Exception as e:
-            logger.warning(f"Overpass request failed: {str(e)}")
-            return None
+        for url in OVERPASS_URLS:
+            try:
+                response = requests.post(url, data={"data": query}, headers=HEADERS, timeout=OVERPASS_TIMEOUT)
+                if 200 <= response.status_code < 300:
+                    return response.json().get("elements", [])
+                logger.warning(f"Overpass request to {url} failed with status {response.status_code}")
+            except Exception as e:
+                logger.warning(f"Overpass request to {url} failed: {str(e)}")
+        return None
 
     def draw_waterways(self, canvas, waterways, project, dimensions, color):
         # Thin, isolated lines and mid-tone grays get lost in an e-ink panel's
