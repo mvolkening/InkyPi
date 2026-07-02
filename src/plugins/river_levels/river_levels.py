@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytz
 import requests
-from PIL import Image, ImageDraw, ImageEnhance, ImageOps
+from PIL import Image, ImageDraw, ImageOps
 
 from plugins.base_plugin.base_plugin import BasePlugin
 
@@ -46,6 +46,9 @@ STATION_WATERWAY_RADIUS_M = 350  # how far from a station to look for "its" wate
 # to plain black once a 6-7 color e-ink panel quantizes the image, making
 # rivers blend into dithered map/text and effectively disappear.
 DEFAULT_RIVER_COLOR = "#1a73e8"
+
+BASEMAP_GAMMA = 2.4
+GAMMA_LUT = [min(255, round(255 * ((i / 255) ** BASEMAP_GAMMA))) for i in range(256)]
 
 STATION_COLORS = [
     "#1f78b4", "#e31a1c", "#33a02c", "#ff7f00",
@@ -311,16 +314,23 @@ class RiverLevels(BasePlugin):
         x2, y2 = self.lonlat_to_pixel(east, south, zoom)
         center_x, center_y = (x1 + x2) / 2, (y1 + y2) / 2
 
-        width, height = dimensions
-        crop_left = center_x - width / 2
-        crop_top = center_y - height / 2
+        # Crop tight to the selected bbox's own pixel size at this zoom, not
+        # padded out to the full target canvas: integer zoom levels double in
+        # resolution each step, so the bbox can land anywhere from just barely
+        # fitting down to only ~half the target size at the chosen zoom. Always
+        # padding out to the full canvas size left a large band of unselected
+        # surrounding map around the bbox instead of filling the frame with it.
+        bbox_width = max(1, round(abs(x2 - x1)))
+        bbox_height = max(1, round(abs(y2 - y1)))
+        crop_left = center_x - bbox_width / 2
+        crop_top = center_y - bbox_height / 2
 
-        canvas = Image.new("RGB", dimensions, "#aad3df")
+        tile_canvas = Image.new("RGB", (bbox_width, bbox_height), "#e8e8e8")
 
         tile_min_x = int(crop_left // TILE_SIZE)
-        tile_max_x = int((crop_left + width) // TILE_SIZE)
+        tile_max_x = int((crop_left + bbox_width) // TILE_SIZE)
         tile_min_y = int(crop_top // TILE_SIZE)
-        tile_max_y = int((crop_top + height) // TILE_SIZE)
+        tile_max_y = int((crop_top + bbox_height) // TILE_SIZE)
 
         for tile_x in range(tile_min_x, tile_max_x + 1):
             for tile_y in range(tile_min_y, tile_max_y + 1):
@@ -331,19 +341,30 @@ class RiverLevels(BasePlugin):
                     continue
                 paste_x = int(tile_x * TILE_SIZE - crop_left)
                 paste_y = int(tile_y * TILE_SIZE - crop_top)
-                canvas.paste(tile_image, (paste_x, paste_y))
+                tile_canvas.paste(tile_image, (paste_x, paste_y))
+
+        # scale the tight bbox crop up (or down) to exactly fill the target
+        # canvas; the bbox's aspect ratio rarely matches the display's exactly,
+        # so this can mildly stretch the map, which is far less noticeable than
+        # a large empty/unselected margin around the area the user picked.
+        canvas = tile_canvas.resize(dimensions, Image.LANCZOS)
+        scale_x = dimensions[0] / bbox_width
+        scale_y = dimensions[1] / bbox_height
 
         def project(lon, lat):
             px, py = self.lonlat_to_pixel(lon, lat, zoom)
-            return px - crop_left, py - crop_top
+            return (px - crop_left) * scale_x, (py - crop_top) * scale_y
 
-        # Standard OSM tile colours are subtle (pale creams/blues) meant for
-        # full-colour LCDs. On a 6-7 colour e-ink panel they dither down to
-        # near-white and water becomes indistinguishable from land, so the
-        # basemap is muted to grayscale here and the actual river geometry is
-        # drawn on top afterwards in one bold, deliberate colour instead.
-        canvas = ImageOps.grayscale(canvas).convert("RGB")
-        canvas = ImageEnhance.Contrast(canvas).enhance(1.35)
+        # Basemap tile colours are subtle (pale grays/blues) meant for
+        # full-colour LCDs, so roads/labels read as faint mid-grays that wash
+        # out to near-white on a 6-7 colour e-ink panel. A gamma curve darkens
+        # them by absolute tone; autocontrast was tried first but it stretches
+        # based on the image's own histogram, and since a lake/large water body
+        # covers far more pixels than any road or label, it became the
+        # reference "black" point and turned solid water areas jet black
+        # instead of actually darkening the thin road/label ink.
+        canvas = ImageOps.grayscale(canvas)
+        canvas = canvas.point(GAMMA_LUT).convert("RGB")
 
         return canvas, project
 
