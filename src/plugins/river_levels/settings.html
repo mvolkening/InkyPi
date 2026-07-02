@@ -54,8 +54,8 @@
 
 <div class="form-group">
     <label for="riverColor" class="form-label">River Color:</label>
-    <input type="color" id="riverColor" name="riverColor" class="color-picker" value="#0a3d67" />
-    <span title="Rivers are drawn as bold lines in a single color since e-ink displays can't reproduce the subtle pale blues used by standard map tiles. Pick a color your display's palette renders as a clear, dark tone.">ⓘ</span>
+    <input type="color" id="riverColor" name="riverColor" class="color-picker" value="#1a73e8" />
+    <span title="Rivers are drawn as bold lines in a single color since e-ink displays can't reproduce the subtle pale blues used by standard map tiles. Pick a vivid, saturated color - very dark or muted colors can collapse to plain black once your display's limited color palette is applied.">ⓘ</span>
 </div>
 
 <div id="mapModal" class="modal">
@@ -63,8 +63,9 @@
         <span class="close-button" onclick="closeModal('mapModal')">×</span>
         <h2 id="modalTitle">Select Area</h2>
         <div class="separator"></div>
-        <p style="font-size: 0.85em; margin-bottom: 8px;">Pan and zoom until the area you want is entirely within view, then click Save. Every real-time Environment Canada hydrometric station inside that view will be plotted. Data coverage is Canada-wide.</p>
+        <p style="font-size: 0.85em; margin-bottom: 8px;">Pan and zoom until the area you want is entirely within view, then click Save. Red dots show real-time Environment Canada hydrometric stations that will be plotted. Data coverage is Canada-wide.</p>
         <div id="map" style="width: 100%; height: 320px; margin: 10px 0px;"></div>
+        <p style="font-size: 0.8em; margin-top: 4px;" id="stationPreviewStatus"></p>
         <button id="closeMap" type="button" class="action-button">Save</button>
     </div>
 </div>
@@ -81,8 +82,11 @@
         const $north = document.querySelector('#north');
 
         let map;
+        let stationLayer;
+        let previewTimer;
         let defaultCenter = [56, -106]; // Canada, where this data source has coverage
         let defaultZoom = 4;
+        const $status = document.querySelector('#stationPreviewStatus');
 
         function updateAreaSummary() {
             if ($west.value && $south.value && $east.value && $north.value) {
@@ -94,6 +98,40 @@
             }
         }
 
+        async function previewStations() {
+            const bounds = map.getBounds();
+            $status.textContent = 'Looking for stations...';
+            const params = new URLSearchParams({
+                bbox: `${bounds.getWest()},${bounds.getSouth()},${bounds.getEast()},${bounds.getNorth()}`,
+                STATUS_EN: 'Active',
+                REAL_TIME: '1',
+                f: 'json',
+                limit: '500',
+            });
+            try {
+                const response = await fetch(`https://api.weather.gc.ca/collections/hydrometric-stations/items?${params}`);
+                const data = await response.json();
+                stationLayer.clearLayers();
+                (data.features || []).forEach((feature) => {
+                    const [lon, lat] = feature.geometry.coordinates;
+                    const name = feature.properties.STATION_NAME || feature.properties.STATION_NUMBER;
+                    L.circleMarker([lat, lon], {
+                        radius: 5,
+                        color: '#ffffff',
+                        weight: 1,
+                        fillColor: '#e31a1c',
+                        fillOpacity: 1,
+                    }).bindTooltip(name).addTo(stationLayer);
+                });
+                const count = (data.features || []).length;
+                $status.textContent = count
+                    ? `${count} real-time station${count === 1 ? '' : 's'} in view.`
+                    : 'No real-time stations in view - try a larger area.';
+            } catch (error) {
+                $status.textContent = 'Could not load station preview (network error).';
+            }
+        }
+
         $openMap.addEventListener('click', () => {
             openModal('mapModal');
             setTimeout(() => {
@@ -101,6 +139,7 @@
                     let initialView = [defaultCenter, defaultZoom];
                     map = L.map('map');
                     L.tileLayer(OSM_TILE_URL, { attribution: '&copy; OpenStreetMap contributors' }).addTo(map);
+                    stationLayer = L.layerGroup().addTo(map);
 
                     if ($west.value && $south.value && $east.value && $north.value) {
                         map.fitBounds([
@@ -110,8 +149,15 @@
                     } else {
                         map.setView(defaultCenter, defaultZoom);
                     }
+
+                    map.on('moveend', () => {
+                        clearTimeout(previewTimer);
+                        previewTimer = setTimeout(previewStations, 400);
+                    });
+                    previewStations();
                 } else {
                     map.invalidateSize();
+                    previewStations();
                 }
             }, 100);
         });
@@ -137,12 +183,12 @@
             document.getElementById('maxStations').value = pluginSettings.maxStations || '8';
             document.getElementById('metricMode').value = pluginSettings.metricMode || 'auto';
             document.getElementById('customTitle').value = pluginSettings.customTitle || '';
-            document.getElementById('riverColor').value = pluginSettings.riverColor || '#0a3d67';
+            document.getElementById('riverColor').value = pluginSettings.riverColor || '#1a73e8';
         } else {
             document.getElementById('days').value = '7';
             document.getElementById('maxStations').value = '8';
             document.getElementById('metricMode').value = 'auto';
-            document.getElementById('riverColor').value = '#0a3d67';
+            document.getElementById('riverColor').value = '#1a73e8';
         }
     });
 </script>

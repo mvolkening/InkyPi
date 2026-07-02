@@ -2,6 +2,7 @@ import base64
 import io
 import logging
 import math
+import re
 from datetime import datetime, timedelta, timezone
 
 import pytz
@@ -14,12 +15,15 @@ logger = logging.getLogger(__name__)
 
 STATIONS_URL = "https://api.weather.gc.ca/collections/hydrometric-stations/items"
 REALTIME_URL = "https://api.weather.gc.ca/collections/hydrometric-realtime/items"
-OSM_TILE_URL = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
+# CARTO's "Positron" style, unlike stock OSM carto tiles, doesn't fill in
+# woodlots/landuse polygons - just streets, water outlines, and place labels,
+# which reads much more cleanly on a low-color-count e-ink panel.
+OSM_TILE_URL = "https://a.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png"
 OVERPASS_URL = "https://overpass-api.de/api/interpreter"
 
-# OSM's tile usage policy requires a descriptive User-Agent identifying the app.
-# Refresh intervals should stay infrequent (e.g. hourly+) to stay within their
-# acceptable-use guidelines: https://operations.osmfoundation.org/policies/tiles/
+# Descriptive User-Agent per OSM/CARTO/Overpass usage policies. Refresh
+# intervals should stay infrequent (e.g. hourly+) to stay within their
+# acceptable-use guidelines.
 HEADERS = {"User-Agent": "InkyPi-RiverLevelsPlugin/1.0 (+https://github.com/fatihak/InkyPi)"}
 
 REQUEST_TIMEOUT = 15
@@ -37,7 +41,11 @@ CHART_BOX_WIDTH = 150
 CHART_BOX_HEIGHT = 74
 
 MAX_WATERWAY_WAYS = 4000  # protects Overpass/render time for very large or dense areas
-DEFAULT_RIVER_COLOR = "#0a3d67"
+STATION_WATERWAY_RADIUS_M = 350  # how far from a station to look for "its" waterway
+# A vivid, moderately saturated blue. Very dark/muted colors risk collapsing
+# to plain black once a 6-7 color e-ink panel quantizes the image, making
+# rivers blend into dithered map/text and effectively disappear.
+DEFAULT_RIVER_COLOR = "#1a73e8"
 
 STATION_COLORS = [
     "#1f78b4", "#e31a1c", "#33a02c", "#ff7f00",
@@ -103,7 +111,7 @@ class RiverLevels(BasePlugin):
             logger.error(f"Failed to build background map: {str(e)}")
             raise RuntimeError("Failed to retrieve background map tiles, please check logs.")
 
-        waterways = self.get_waterways(bbox)
+        waterways = self.get_waterways(bbox, station_data)
         if waterways:
             self.draw_waterways(basemap, waterways, project, dimensions, river_color)
         else:
@@ -351,39 +359,70 @@ class RiverLevels(BasePlugin):
             logger.warning(f"Failed to fetch map tile {url}: {str(e)}")
             return None
 
-    def get_waterways(self, bbox):
-        cache_key = tuple(round(value, 3) for value in bbox)
+    def get_waterways(self, bbox, stations):
+        """Only draws the waterway(s) a selected station actually sits on, not
+        every named creek in the area: first finds the waterway(s) within a
+        small radius of each station, then (for the named ones) fetches the
+        full geometry of that same river across the whole selected area so it
+        reads as a continuous line rather than a short stub at each pin."""
+        cache_key = (
+            tuple(round(value, 3) for value in bbox),
+            tuple(sorted(station['station_number'] for station in stations)),
+        )
         if cache_key in _WATERWAY_CACHE:
             return _WATERWAY_CACHE[cache_key]
 
-        west, south, east, north = bbox
-        query = (
-            "[out:json][timeout:25];"
-            f'way["waterway"~"^(river|stream|canal)$"]["name"]({south},{west},{north},{east});'
-            "out geom;"
+        near_clauses = "".join(
+            f'way(around:{STATION_WATERWAY_RADIUS_M},{station["latitude"]},{station["longitude"]})'
+            f'["waterway"~"^(river|stream|canal)$"];'
+            for station in stations
         )
-        try:
-            response = requests.post(OVERPASS_URL, data={"data": query}, headers=HEADERS, timeout=OVERPASS_TIMEOUT)
-            if not 200 <= response.status_code < 300:
-                logger.warning(f"Overpass waterway request failed with status {response.status_code}")
-                return []
-            elements = response.json().get("elements", [])
-        except Exception as e:
-            logger.warning(f"Failed to retrieve waterway geometry from Overpass: {str(e)}")
+        near_query = f"[out:json][timeout:25];({near_clauses});out tags geom;"
+
+        near_elements = self.run_overpass_query(near_query)
+        if near_elements is None:
+            _WATERWAY_CACHE[cache_key] = []
             return []
 
+        names = set()
         ways = []
-        for element in elements[:MAX_WATERWAY_WAYS]:
-            geometry = element.get("geometry")
-            if not geometry:
-                continue
-            ways.append([(point["lon"], point["lat"]) for point in geometry])
+        for element in near_elements:
+            name = element.get("tags", {}).get("name")
+            if name:
+                names.add(name)
+            elif element.get("geometry"):
+                # unnamed segment right at the station: keep it directly since
+                # there's no name to broaden the search with
+                ways.append([(point["lon"], point["lat"]) for point in element["geometry"]])
 
-        if len(elements) > MAX_WATERWAY_WAYS:
-            logger.info(f"Overpass returned {len(elements)} waterway segments, drawing the first {MAX_WATERWAY_WAYS}.")
+        if names:
+            west, south, east, north = bbox
+            name_pattern = "|".join(re.escape(name) for name in names)
+            full_query = (
+                "[out:json][timeout:25];"
+                f'way["waterway"~"^(river|stream|canal)$"]["name"~"^({name_pattern})$"]'
+                f"({south},{west},{north},{east});"
+                "out geom;"
+            )
+            full_elements = self.run_overpass_query(full_query) or []
+            for element in full_elements[:MAX_WATERWAY_WAYS]:
+                geometry = element.get("geometry")
+                if geometry:
+                    ways.append([(point["lon"], point["lat"]) for point in geometry])
 
         _WATERWAY_CACHE[cache_key] = ways
         return ways
+
+    def run_overpass_query(self, query):
+        try:
+            response = requests.post(OVERPASS_URL, data={"data": query}, headers=HEADERS, timeout=OVERPASS_TIMEOUT)
+            if not 200 <= response.status_code < 300:
+                logger.warning(f"Overpass request failed with status {response.status_code}")
+                return None
+            return response.json().get("elements", [])
+        except Exception as e:
+            logger.warning(f"Overpass request failed: {str(e)}")
+            return None
 
     def draw_waterways(self, canvas, waterways, project, dimensions, color):
         draw = ImageDraw.Draw(canvas)

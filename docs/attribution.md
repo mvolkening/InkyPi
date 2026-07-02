@@ -44,8 +44,9 @@ This project uses various fonts and icons, each with specific licensing terms. B
 ## Map & Hydrometric Data Sources (River Levels plugin)
 | Source | Usage | License / Policy |
 |---|---|---|
-| [OpenStreetMap](https://www.openstreetmap.org/copyright) tiles | Background map, stitched server-side into a static image | Data &copy; OpenStreetMap contributors, [ODbL](https://opendatacommons.org/licenses/odbl/); tile access governed by the [OSM Tile Usage Policy](https://operations.osmfoundation.org/policies/tiles/) &mdash; keep plugin refresh intervals infrequent (hourly or slower) |
-| [Environment and Climate Change Canada, Water Survey of Canada](https://api.weather.gc.ca/collections/hydrometric-realtime) hydrometric API | Real-time station list and water level/discharge readings | [Open Government Licence &ndash; Canada](https://open.canada.ca/en/open-government-licence-canada) |
+| [CARTO Positron](https://carto.com/basemaps) raster tiles | Background map, stitched server-side into a static image, muted to grayscale for e-ink legibility | Data &copy; OpenStreetMap contributors, [ODbL](https://opendatacommons.org/licenses/odbl/); style/tiles &copy; [CARTO](https://carto.com/attributions) &mdash; keep plugin refresh intervals infrequent (hourly or slower) |
+| [Overpass API](https://overpass-api.de/) (OpenStreetMap waterway data) | Line geometry for the specific river/stream/canal each selected station sits on, drawn as a bold single-color overlay | Data &copy; OpenStreetMap contributors, [ODbL](https://opendatacommons.org/licenses/odbl/); subject to the shared public instance's [fair-use guidelines](https://dev.overpass-api.de/overpass-doc/en/preface/commons.html) |
+| [Environment and Climate Change Canada, Water Survey of Canada](https://api.weather.gc.ca/collections/hydrometric-realtime) hydrometric API | Real-time station list and water level/discharge readings, including a live station preview on the settings page's area picker | [Open Government Licence &ndash; Canada](https://open.canada.ca/en/open-government-licence-canada) |
 | [waterwaymap.org](https://waterwaymap.org) | Inspiration for the concept; not embedded directly since its live MapLibre/PMTiles rendering isn't compatible with this project's static-screenshot pipeline | N/A |
 
 ## Waveshare e-Paper
