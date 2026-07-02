@@ -449,12 +449,25 @@ class RiverLevels(BasePlugin):
             return None
 
     def draw_waterways(self, canvas, waterways, project, dimensions, color):
-        draw = ImageDraw.Draw(canvas)
-        line_width = max(2, round(4 * dimensions[0] / 800))
+        # Thin, isolated lines and mid-tone grays get lost in an e-ink panel's
+        # dithering almost entirely (confirmed on hardware: roads and a first
+        # attempt at the river lines both vanished, while large filled areas
+        # like lakes and high-contrast text survived). A wide white "casing"
+        # drawn under a wide colored line creates a hard edge the dithering
+        # can't erase, the same technique cartographic styles use for rivers.
+        line_width = max(6, round(14 * dimensions[0] / 800))
+        casing_width = line_width + max(4, round(8 * dimensions[0] / 800))
+
+        line_points = []
         for way in waterways:
             points = [project(lon, lat) for lon, lat in way]
-            if len(points) < 2:
-                continue
+            if len(points) >= 2:
+                line_points.append(points)
+
+        draw = ImageDraw.Draw(canvas)
+        for points in line_points:
+            draw.line(points, fill="#ffffff", width=casing_width, joint="curve")
+        for points in line_points:
             draw.line(points, fill=color, width=line_width, joint="curve")
 
     def layout_station_boxes(self, positions, dimensions):
