@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(\"/c/Program Files/Google/Chrome/Application/chrome.exe\" --headless --disable-gpu --screenshot=\"C:\\\\Users\\\\mvolk\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-mvolk-Documents-InkyPi-InkyPi\\\\65cb74f7-5d8c-4e9c-a4f6-d9c1a9e83cb6\\\\scratchpad\\\\river_levels_screenshot10.png\" --window-size=1600,1200 \"file:///C:/Users/mvolk/AppData/Local/Temp/claude/c--Users-mvolk-Documents-InkyPi-InkyPi/65cb74f7-5d8c-4e9c-a4f6-d9c1a9e83cb6/scratchpad/river_levels_render.html\")",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)"
+    ]
+  }
+}

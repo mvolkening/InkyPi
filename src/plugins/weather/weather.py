@@ -392,6 +392,13 @@ class Weather(BasePlugin):
         })
 
         data_points.append({
+            "label": "WindDeg",
+            "measurement": weather.get('current', {}).get("wind_deg"),
+            "unit": UNITS[units]["deg"],
+            "icon": self.get_plugin_dir('icons/wind.png')
+        })
+
+        data_points.append({
             "label": "Humidity",
             "measurement": weather.get('current', {}).get("humidity"),
             "unit": '%',
