@@ -1,0 +1,10 @@
+# This project deploys to a Linux device (Raspberry Pi) even when developed on
+# Windows. Force LF line endings for anything that gets executed as a shell
+# script or read by systemd/udev on the Pi, regardless of the checking-out
+# platform's core.autocrlf setting - a CRLF shell script fails outright on
+# Linux ("$'\r': command not found"), it's not just cosmetic.
+*.sh text eol=lf
+.envrc text eol=lf
+install/inkypi text eol=lf
+install/inkypi.service text eol=lf
+install/cli/inkypi-plugin text eol=lf
