@@ -2,8 +2,11 @@
 
 {% block content %}
 
-<div class="countdown-container">
-    <div class="countdown-wrapper" >
+{% set highlight = plugin_settings.highlightText in [true, 'true'] %}
+{% set highlight_style = '-webkit-text-stroke: ' ~ (plugin_settings.highlightThickness or 4) ~ 'px ' ~ (plugin_settings.highlightColor or '#ffffff') ~ '; paint-order: stroke fill;' if highlight else '' %}
+{% set font_family = plugin_settings.fontFamily or 'Jost' %}
+<div class="countdown-container" style="font-family: '{{ font_family }}';">
+    <div class="countdown-wrapper" style="{{ highlight_style }}">
         <h1 class="title">{{title}}</h1>
         <p class="subtitle">{{date}}</p>
         <div class="day_count">{{day_count}}</div>

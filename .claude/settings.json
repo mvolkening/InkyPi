@@ -3,7 +3,35 @@
     "allow": [
       "Bash(\"/c/Program Files/Google/Chrome/Application/chrome.exe\" --headless --disable-gpu --screenshot=\"C:\\\\Users\\\\mvolk\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-mvolk-Documents-InkyPi-InkyPi\\\\65cb74f7-5d8c-4e9c-a4f6-d9c1a9e83cb6\\\\scratchpad\\\\river_levels_screenshot10.png\" --window-size=1600,1200 \"file:///C:/Users/mvolk/AppData/Local/Temp/claude/c--Users-mvolk-Documents-InkyPi-InkyPi/65cb74f7-5d8c-4e9c-a4f6-d9c1a9e83cb6/scratchpad/river_levels_render.html\")",
       "Bash(git add *)",
-      "Bash(git commit -m ' *)"
+      "Bash(git commit -m ' *)",
+      "Bash(where chromium-headless-shell *)",
+      "WebFetch(domain:docs.google.com)",
+      "WebFetch(domain:doc-04-5s-sheets.googleusercontent.com)",
+      "Bash(xargs -I{} echo {})",
+      "Bash(python3 -c ' *)",
+      "Bash(where python *)",
+      "Bash(where python3 *)",
+      "Bash(where py *)",
+      "Bash('C:\\\\Users\\\\mvolk\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python39\\\\python.exe' -c ' *)",
+      "Bash(\"C:\\\\Users\\\\mvolk\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python39\\\\python.exe\" \"C:\\\\Users\\\\mvolk\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-mvolk-Documents-InkyPi-InkyPi\\\\26b14c05-0728-4537-a795-7dca2e1d5e41\\\\scratchpad\\\\make_icon.py\")",
+      "Bash(\"C:\\\\Users\\\\mvolk\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python39\\\\python.exe\" \"C:\\\\Users\\\\mvolk\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-mvolk-Documents-InkyPi-InkyPi\\\\26b14c05-0728-4537-a795-7dca2e1d5e41\\\\scratchpad\\\\render_preview.py\")",
+      "Bash(ls -la \"/c/Program Files \\(x86\\)/Google/Chrome/Application/chrome.exe\")",
+      "Read(//c/Program Files \\(x86\\)/Google/Chrome/Application/**)",
+      "Read(//c/Program Files \\(x86\\)/Google/Chrome/**)",
+      "Read(//c/Program Files \\(x86\\)/Microsoft/Edge/Application//**)",
+      "Bash(ls \"/c/Users/mvolk/AppData/Local/Google/Chrome/Application/\" 2>&1)",
+      "Read(//c/Users/mvolk/AppData/Local/Google/Chrome/**)",
+      "Bash(rm -f \"C:\\\\Users\\\\mvolk\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-mvolk-Documents-InkyPi-InkyPi\\\\26b14c05-0728-4537-a795-7dca2e1d5e41\\\\scratchpad\"/*.html \"C:\\\\Users\\\\mvolk\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-mvolk-Documents-InkyPi-InkyPi\\\\26b14c05-0728-4537-a795-7dca2e1d5e41\\\\scratchpad\"/*.png)",
+      "Bash(xxd)",
+      "Bash(mkdir -p /tmp_backup_ignore)",
+      "Bash(cp medieval_background.png \"C:/Users/mvolk/AppData/Local/Temp/claude/c--Users-mvolk-Documents-InkyPi-InkyPi/26b14c05-0728-4537-a795-7dca2e1d5e41/scratchpad/medieval_background.orig.png\")",
+      "Bash(cp fary_tale_background.png \"C:/Users/mvolk/AppData/Local/Temp/claude/c--Users-mvolk-Documents-InkyPi-InkyPi/26b14c05-0728-4537-a795-7dca2e1d5e41/scratchpad/fary_tale_background.orig.png\")",
+      "Bash(cp scifi_background.png \"C:/Users/mvolk/AppData/Local/Temp/claude/c--Users-mvolk-Documents-InkyPi-InkyPi/26b14c05-0728-4537-a795-7dca2e1d5e41/scratchpad/scifi_background.orig.png\")",
+      "Bash(\"C:\\\\Users\\\\mvolk\\\\AppData\\\\Local\\\\Programs\\\\Python\\\\Python39\\\\python.exe\" \"C:\\\\Users\\\\mvolk\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-mvolk-Documents-InkyPi-InkyPi\\\\26b14c05-0728-4537-a795-7dca2e1d5e41\\\\scratchpad\\\\fix_png.py\" \"c:/Users/mvolk/Documents/InkyPi/InkyPi/src/plugins/scoreboard/medieval_background.png\" \"c:/Users/mvolk/Documents/InkyPi/InkyPi/src/plugins/scoreboard/fary_tale_background.png\" \"c:/Users/mvolk/Documents/InkyPi/InkyPi/src/plugins/scoreboard/scifi_background.png\")",
+      "Bash(python3 -)"
+    ],
+    "additionalDirectories": [
+      "C:\\Users\\mvolk\\AppData\\Local\\Temp\\claude\\c--Users-mvolk-Documents-InkyPi-InkyPi\\26b14c05-0728-4537-a795-7dca2e1d5e41\\scratchpad"
     ]
   }
 }

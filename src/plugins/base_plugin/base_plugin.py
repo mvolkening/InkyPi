@@ -49,6 +49,13 @@ class BasePlugin:
     def generate_image(self, settings, device_config):
         raise NotImplementedError("generate_image must be implemented by subclasses")
 
+    def on_startup(self, instance_settings, device_config):
+        """Optional hook called once per configured playlist instance right after the
+        app starts, before any refresh/render happens. No-op by default; plugins that
+        need to do eager, persistent background work (e.g. continuous monitoring that
+        should survive a reboot without waiting for a first refresh) can override this."""
+        pass
+
     def get_plugin_id(self):
         return self.config.get("id")
 

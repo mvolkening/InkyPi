@@ -5,7 +5,34 @@
     </div>
     <div class="form-group">
         <label for="date" class="form-label">Date</label>
-        <input type="date" id="date" name="date" class="form-input" />
+        <input type="date" id="date" name="date" class="form-input" min="1970-01-01" max="2100-12-31" />
+    </div>
+    <div class="form-group">
+        <label for="fontFamily" class="form-label">Font</label>
+        <select id="fontFamily" name="fontFamily" class="form-input">
+            {% for font in font_families %}
+            <option value="{{ font }}">{{ font }}</option>
+            {% endfor %}
+        </select>
+    </div>
+</div>
+
+<div class="form-group">
+    <label for="highlightText" class="form-label">Text Outline:</label>
+    <div class="form-group nowrap">
+        <span>Add an outline around the text</span>
+        <div class="toggle-container">
+            <input type="checkbox" id="highlightText" name="highlightText" class="toggle-checkbox" value="false" onclick="this.value=this.checked ? 'true' : 'false';">
+            <label for="highlightText" class="toggle-label"></label>
+        </div>
+    </div>
+    <div class="form-group nowrap">
+        <label for="highlightColor" class="form-label">Color</label>
+        <input type="color" id="highlightColor" name="highlightColor" class="color-picker" value="#ffffff">
+    </div>
+    <div class="form-group nowrap">
+        <label for="highlightThickness" class="form-label">Outline Width</label>
+        <input type="number" id="highlightThickness" name="highlightThickness" class="form-input" min="0" max="50" step="1" value="4">px
     </div>
 </div>
 
@@ -14,6 +41,13 @@
         if (loadPluginSettings) {
             document.getElementById('title').value = pluginSettings.title || '';
             document.getElementById('date').value = pluginSettings.date;
+            document.getElementById('fontFamily').value = pluginSettings.fontFamily || 'Jost';
+
+            const highlightText = pluginSettings.highlightText === 'true' || pluginSettings.highlightText === true;
+            document.getElementById('highlightText').checked = highlightText;
+            document.getElementById('highlightText').value = highlightText ? 'true' : 'false';
+            document.getElementById('highlightColor').value = pluginSettings.highlightColor || '#ffffff';
+            document.getElementById('highlightThickness').value = pluginSettings.highlightThickness || 4;
         }
     });
 </script>

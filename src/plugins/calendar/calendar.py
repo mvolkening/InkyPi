@@ -60,7 +60,13 @@ class Calendar(BasePlugin):
             "timezone": timezone,
             "plugin_settings": settings,
             "time_format": time_format,
-            "font_scale": FONT_SIZES.get(settings.get("fontSize", "normal"))
+            "font_scale": FONT_SIZES.get(settings.get("fontSize", "normal")),
+            # Vendored locally rather than loaded from a CDN: this HTML is rendered
+            # by a fresh headless-Chromium process on the device itself, so a CDN
+            # fetch here depends on the device's own internet being up at that
+            # instant. A slow/failed fetch doesn't raise an error - the page still
+            # loads, FullCalendar just never runs, producing a silently blank screenshot.
+            "fullcalendar_js_path": resolve_path(os.path.join("static", "scripts", "fullcalendar", "index.global.min.js")),
         }
 
         image = self.render_image(dimensions, "calendar.html", "calendar.css", template_params)

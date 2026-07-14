@@ -27,7 +27,7 @@ from blueprints.settings import settings_bp
 from blueprints.plugin import plugin_bp
 from blueprints.playlist import playlist_bp
 from jinja2 import ChoiceLoader, FileSystemLoader
-from plugins.plugin_registry import load_plugins
+from plugins.plugin_registry import load_plugins, get_plugin_instance
 from waitress import serve
 
 
@@ -77,6 +77,20 @@ app.register_blueprint(plugin_bp)
 app.register_blueprint(playlist_bp)
 
 if __name__ == '__main__':
+
+    # give each configured plugin instance a chance to do eager, persistent
+    # startup work (e.g. a plugin that continuously monitors something in the
+    # background) before the first refresh/render happens
+    for playlist in device_config.get_playlist_manager().playlists:
+        for plugin_instance in playlist.plugins:
+            plugin_config = device_config.get_plugin(plugin_instance.plugin_id)
+            if not plugin_config:
+                continue
+            try:
+                plugin = get_plugin_instance(plugin_config)
+                plugin.on_startup(plugin_instance.settings, device_config)
+            except Exception:
+                logger.exception(f"Error running startup hook for plugin '{plugin_instance.plugin_id}'")
 
     # start the background refresh task
     refresh_task.start()

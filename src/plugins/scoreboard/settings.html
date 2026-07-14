@@ -1,0 +1,91 @@
+<div class="form-group">
+    <label for="sheetUrl" class="form-label">Google Sheet Link:</label>
+    <input type="text" id="sheetUrl" name="sheetUrl" class="form-input" placeholder="https://docs.google.com/spreadsheets/d/..." />
+    <span title="Paste the 'Share' link to your results Google Sheet. The sheet's sharing setting must be 'Anyone with the link can view'. See the plugin README for the expected Google Form/Sheet layout.">ⓘ</span>
+</div>
+
+<div class="form-group">
+    <label for="title" class="form-label">Title:</label>
+    <input type="text" id="title" name="title" class="form-input" placeholder="Leaderboard" />
+</div>
+
+<div class="form-group">
+    <label class="form-label">Theme Selection:</label>
+    <div class="form-group nowrap">
+        <label>
+            <input type="radio" name="themeMode" value="fixed" checked onchange="updateThemeModeUI()">
+            Fixed
+        </label>
+        <label>
+            <input type="radio" name="themeMode" value="random" onchange="updateThemeModeUI()">
+            Random each refresh
+        </label>
+    </div>
+</div>
+
+<div class="form-group" id="themeSelectGroup">
+    <label for="theme" class="form-label">Theme:</label>
+    <select id="theme" name="theme" class="form-input">
+        <option value="medieval">Medieval</option>
+        <option value="scifi">Sci-Fi</option>
+        <option value="fairytale">Fairytale</option>
+    </select>
+    <span title="Each theme has its own default background art. Uploading a custom background image below overrides it.">ⓘ</span>
+</div>
+
+<div class="form-group">
+    <label for="maxPlayers" class="form-label">Players Shown:</label>
+    <select id="maxPlayers" name="maxPlayers" class="form-input">
+        <option value="3">Top 3</option>
+        <option value="5">Top 5</option>
+        <option value="10">Top 10</option>
+        <option value="15">Top 15</option>
+        <option value="20">Top 20</option>
+        <option value="50">All</option>
+    </select>
+    <span title="The leaderboard sits in a fairly small panel over the theme artwork, so fewer players tends to stay more readable.">ⓘ</span>
+</div>
+
+<div class="form-group">
+    <label for="gameFilter" class="form-label">Filter by Game:</label>
+    <input type="text" id="gameFilter" name="gameFilter" class="form-input" placeholder="Leave blank to combine all games" />
+    <span title="If your sheet tracks results for multiple different games, type one exactly as it appears in the 'Game' column to show a leaderboard for just that game. Leave blank to combine every game into one overall leaderboard.">ⓘ</span>
+</div>
+
+<div class="form-group">
+    <label for="outlineWidth" class="form-label">Text Outline Width:</label>
+    <input type="number" id="outlineWidth" name="outlineWidth" class="form-input" min="0" max="15" step="1">px
+    <label for="outlineColor" class="form-label">Color:</label>
+    <input type="color" id="outlineColor" name="outlineColor" class="color-picker" value="#ffffff" />
+    <span title="Every letter is drawn with this outline so text stays readable over the busy background artwork. Set width to 0 to turn it off.">ⓘ</span>
+</div>
+
+<script>
+    function updateThemeModeUI() {
+        const random = document.querySelector('input[name="themeMode"]:checked').value === 'random';
+        document.getElementById('themeSelectGroup').style.opacity = random ? 0.5 : 1;
+        document.getElementById('theme').disabled = random;
+    }
+
+    document.addEventListener('DOMContentLoaded', () => {
+        if (loadPluginSettings) {
+            document.getElementById('sheetUrl').value = pluginSettings.sheetUrl || '';
+            document.getElementById('title').value = pluginSettings.title || '';
+            document.getElementById('theme').value = pluginSettings.theme || 'medieval';
+            document.getElementById('maxPlayers').value = pluginSettings.maxPlayers || '5';
+            document.getElementById('gameFilter').value = pluginSettings.gameFilter || '';
+            document.getElementById('outlineWidth').value = pluginSettings.outlineWidth || '5';
+            document.getElementById('outlineColor').value = pluginSettings.outlineColor || '#ffffff';
+
+            const themeMode = pluginSettings.themeMode || 'fixed';
+            document.querySelector(`input[name="themeMode"][value="${themeMode}"]`).checked = true;
+        } else {
+            document.getElementById('sheetUrl').value = 'https://docs.google.com/spreadsheets/d/1-xHxi7RQPxeqjaxZOak_wkbYVYrUvuJD5lWuBgAksCw/edit?usp=sharing';
+            document.getElementById('theme').value = 'medieval';
+            document.getElementById('maxPlayers').value = '5';
+            document.getElementById('outlineWidth').value = '5';
+            document.getElementById('outlineColor').value = '#ffffff';
+        }
+        updateThemeModeUI();
+    });
+</script>

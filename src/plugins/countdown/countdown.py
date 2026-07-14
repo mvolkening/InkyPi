@@ -1,4 +1,5 @@
 from plugins.base_plugin.base_plugin import BasePlugin
+from utils.app_utils import get_font_families
 from PIL import Image
 from datetime import datetime, timezone
 import logging
@@ -9,6 +10,7 @@ class Countdown(BasePlugin):
     def generate_settings_template(self):
         template_params = super().generate_settings_template()
         template_params['style_settings'] = True
+        template_params['font_families'] = get_font_families()
         return template_params
 
     def generate_image(self, settings, device_config):

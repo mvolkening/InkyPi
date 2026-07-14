@@ -104,6 +104,9 @@ def get_fonts():
 def get_font_path(font_name):
     return resolve_path(os.path.join("static", "fonts", FONTS[font_name]))
 
+def get_font_families():
+    return list(FONT_FAMILIES.keys())
+
 def generate_startup_image(dimensions=(800,480)):
     bg_color = (255,255,255)
     text_color = (0,0,0)

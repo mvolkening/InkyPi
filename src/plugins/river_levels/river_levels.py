@@ -2,6 +2,7 @@ import base64
 import io
 import logging
 import math
+import os
 import re
 from datetime import datetime, timedelta, timezone
 
@@ -10,6 +11,7 @@ import requests
 from PIL import Image, ImageDraw, ImageFilter, ImageOps
 
 from plugins.base_plugin.base_plugin import BasePlugin
+from utils.app_utils import resolve_path
 
 logger = logging.getLogger(__name__)
 
@@ -162,6 +164,12 @@ class RiverLevels(BasePlugin):
             "days": days,
             "last_refresh_time": last_refresh_time,
             "plugin_settings": settings,
+            # Vendored locally rather than loaded from a CDN: this HTML is rendered
+            # by a fresh headless-Chromium process on the device itself, so a CDN
+            # fetch here depends on the device's own internet being up at that
+            # instant. A slow/failed fetch doesn't raise an error - the page still
+            # loads, Chart.js just never runs, producing a silently blank chart.
+            "chartjs_path": resolve_path(os.path.join("static", "scripts", "chartjs", "chart.umd.min.js")),
         }
 
         image = self.render_image(dimensions, "river_levels.html", "river_levels.css", template_params)

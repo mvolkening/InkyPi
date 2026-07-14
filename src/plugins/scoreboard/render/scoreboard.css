@@ -1,0 +1,244 @@
+.scoreboard-frame {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background-color: #000;
+  background-size: cover;
+  background-position: center;
+}
+
+/* Positioned over the blank scroll/gate/hologram-screen area that's part of
+   the artwork itself in all three background images, at roughly the same
+   spot in each. */
+.scoreboard-panel {
+  position: absolute;
+  left: 36%;
+  top: 34.7%;
+  width: 29.4%;
+  height: 36%;
+  container-type: size;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  padding: 2.5cqh 3cqw;
+  overflow: hidden;
+  background: transparent;
+
+  /* Individual letter outlining so text stays legible over busy artwork;
+     width/color are user-configurable plugin settings. -webkit-text-stroke
+     is inherited, so setting it once here covers all text below. */
+  -webkit-text-stroke: var(--outline-width) var(--outline-color);
+  paint-order: stroke fill;
+}
+
+.scoreboard-header {
+  text-align: center;
+  flex-shrink: 0;
+  margin-bottom: 2cqh;
+}
+
+.scoreboard-title {
+  font-size: min(9cqw, 9cqh);
+  font-weight: 700;
+  line-height: 1.1;
+}
+
+.scoreboard-subtitle {
+  margin-top: 0.5cqh;
+  font-size: min(4cqw, 4cqh);
+  opacity: 0.85;
+  -webkit-text-stroke-width: calc(var(--outline-width) * 0.25);
+}
+
+.scoreboard-list {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  container-type: size;
+}
+
+.scoreboard-row {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  gap: 3cqw;
+  padding: 0 1cqw;
+  overflow: hidden;
+}
+
+.rank-badge {
+  flex: 0 0 auto;
+  width: 18cqw;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 1.5cqw;
+  font-size: min(8cqh, 7cqw);
+  font-weight: 700;
+}
+
+.rank-icon {
+  font-size: min(7cqh, 6cqw);
+}
+
+.player-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: min(7cqh, 6cqw);
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.player-breakdown {
+  flex: 0 0 auto;
+  /* A floor in absolute px keeps this legible even in a small panel, where
+     the cq-relative size alone would shrink it below comfortable reading size. */
+  font-size: max(9px, min(6cqh, 5cqw));
+  opacity: 0.7;
+  /* At this small a font size, the full outline would overwhelm the digits
+     into an unreadable blob, so secondary/small text gets a lighter one. */
+  -webkit-text-stroke-width: calc(var(--outline-width) * 0.25);
+}
+
+.player-points {
+  flex: 0 0 auto;
+  width: 16cqw;
+  text-align: right;
+  font-size: min(8cqh, 7cqw);
+  font-weight: 700;
+}
+
+.scoreboard-empty {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  gap: 1cqh;
+}
+
+.scoreboard-empty p {
+  font-size: min(5cqw, 5cqh);
+}
+
+.scoreboard-empty-sub {
+  opacity: 0.75;
+  font-size: max(9px, min(3.4cqw, 3.4cqh)) !important;
+  -webkit-text-stroke-width: calc(var(--outline-width) * 0.25);
+}
+
+.scoreboard-footer {
+  flex-shrink: 0;
+  display: flex;
+  justify-content: space-between;
+  margin-top: 1.5cqh;
+  padding-top: 1cqh;
+  font-size: max(8px, min(2.8cqw, 2.8cqh));
+  opacity: 0.85;
+  -webkit-text-stroke-width: calc(var(--outline-width) * 0.25);
+}
+
+/* ---------- Medieval theme: ink on parchment ---------- */
+
+.theme-medieval .scoreboard-panel {
+  font-family: Georgia, "Times New Roman", serif;
+  color: #3b2412;
+}
+
+.theme-medieval .scoreboard-title {
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+}
+
+.theme-medieval .scoreboard-row {
+  border-bottom: 1px solid rgba(59, 36, 18, 0.35);
+}
+
+.theme-medieval .scoreboard-row:last-child {
+  border-bottom: none;
+}
+
+.theme-medieval .rank-badge {
+  color: #7a4f0f;
+}
+
+.theme-medieval .player-points {
+  color: #7a1f1f;
+}
+
+.theme-medieval .scoreboard-footer {
+  border-top: 1px solid rgba(59, 36, 18, 0.35);
+}
+
+/* ---------- Sci-Fi theme: hologram display ---------- */
+
+.theme-scifi .scoreboard-panel {
+  font-family: "Jost", "Segoe UI", sans-serif;
+  /* The bundled hologram-screen artwork reads as a light hazy blue, not a
+     dark display, so text needs a dark fill (with the light outline doing
+     the halo work) rather than the near-white a "hologram" might suggest. */
+  color: #0a1830;
+}
+
+.theme-scifi .scoreboard-title {
+  text-transform: uppercase;
+  letter-spacing: 0.15em;
+}
+
+.theme-scifi .scoreboard-row {
+  border-bottom: 1px solid rgba(10, 24, 48, 0.35);
+}
+
+.theme-scifi .scoreboard-row:last-child {
+  border-bottom: none;
+}
+
+.theme-scifi .rank-badge {
+  color: #0d3b66;
+}
+
+.theme-scifi .player-points {
+  color: #0d3b66;
+}
+
+.theme-scifi .scoreboard-footer {
+  border-top: 1px solid rgba(10, 24, 48, 0.35);
+}
+
+/* ---------- Fairytale theme: storybook whimsy ---------- */
+
+.theme-fairytale .scoreboard-panel {
+  font-family: Georgia, "Bookman Old Style", serif;
+  color: #4a2160;
+}
+
+.theme-fairytale .scoreboard-title {
+  font-style: italic;
+  letter-spacing: 0.05em;
+}
+
+.theme-fairytale .scoreboard-row {
+  border-bottom: 1px solid rgba(74, 33, 96, 0.3);
+}
+
+.theme-fairytale .scoreboard-row:last-child {
+  border-bottom: none;
+}
+
+.theme-fairytale .rank-badge {
+  color: #c2478d;
+}
+
+.theme-fairytale .player-points {
+  color: #8a3fae;
+}
+
+.theme-fairytale .scoreboard-footer {
+  border-top: 1px solid rgba(74, 33, 96, 0.3);
+}

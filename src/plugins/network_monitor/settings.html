@@ -1,0 +1,96 @@
+<div class="form-group">
+    <label for="title" class="form-label">Title</label>
+    <input type="text" id="title" name="title" placeholder="Internet Outage Monitor" class="form-input">
+</div>
+
+<div class="form-group">
+    <span>
+        This plugin polls a small failover chain of well-known public resolvers roughly once a second in the
+        background to detect internet outages, independent of how often this display refreshes: Cloudflare
+        (1.1.1.1) first, then Google (8.8.8.8) and Quad9 (9.9.9.9) as fallbacks, so one provider dropping ICMP
+        doesn't read as a real outage - only when all three fail is it counted as one. When that happens, it
+        also checks your local router/gateway once to tell a local Wi-Fi/cable problem apart from a real ISP
+        outage, shown as "Outage (Local)" vs "Outage (ISP)" in the badge above.
+        By default, monitoring starts as soon as this plugin is saved/previewed for the first time and keeps
+        running for as long as InkyPi is running, building up history for the sparklines, hourly outage
+        histogram, and 4-week calendar shown on screen. A short "no data" period will show right after the
+        very first save while the first samples are collected. Turning on Persistent Monitoring below starts
+        it automatically on every InkyPi boot/reboot instead, so outages during/right after a reboot also
+        show up in the history.
+    </span>
+</div>
+
+<div class="form-group nowrap">
+    <label for="persistentMonitoring" class="form-label">Persistent Monitoring:</label>
+    <div class="toggle-container">
+        <input type="checkbox" id="persistentMonitoring" name="persistentMonitoring" class="toggle-checkbox" value="false" onclick="this.value=this.checked ? 'true' : 'false';">
+        <label for="persistentMonitoring" class="toggle-label"></label>
+    </div>
+</div>
+
+<div class="form-group nowrap">
+    <label for="gatewayIp" class="form-label">Router/Gateway IP</label>
+    <input type="text" id="gatewayIp" name="gatewayIp" class="form-input" placeholder="auto-detect">
+    <span title="Only used for the Local vs ISP outage check above, when every external resolver has failed. Leave blank to auto-detect (e.g. 192.168.1.1 or 192.168.0.1); set this if auto-detection picks the wrong interface or fails on your setup.">&#9432;</span>
+</div>
+
+<div class="form-group nowrap">
+    <label for="minOutageSeconds" class="form-label">Minimum Outage Duration</label>
+    <input type="number" id="minOutageSeconds" name="minOutageSeconds" class="form-input" min="0" max="300" step="1" value="2">sec
+    <span title="Outages shorter than this are treated as noise (e.g. a single dropped packet) and left out of the sparklines, hourly histogram, and calendar. Set to 0 to count every failed ping. The live Online/Outage status above always reflects the ping happening right now, regardless of this setting.">&#9432;</span>
+</div>
+
+<div class="form-group">
+    <span>The hourly outage histogram is laid out like a normal calendar week (fixed Sun-Sat or Mon-Sun columns,
+        not just the last 7 days) so recurring patterns - e.g. outages every Tuesday evening - are easy to spot.</span>
+</div>
+
+<div class="form-group nowrap">
+    <label for="weekStart" class="form-label">Week Starts On</label>
+    <select id="weekStart" name="weekStart" class="form-input">
+        <option value="sunday">Sunday</option>
+        <option value="monday">Monday</option>
+    </select>
+</div>
+
+<div class="form-group nowrap">
+    <label for="historyWeeks" class="form-label">Histogram History</label>
+    <input type="number" id="historyWeeks" name="historyWeeks" class="form-input" min="1" max="12" step="1" value="4">week(s)
+    <span title="How many weeks of history feed the histogram. With more than 1 week, each weekday/hour bar aggregates that many observations - pick how below.">&#9432;</span>
+</div>
+
+<div class="form-group nowrap" id="aggregationRow">
+    <label for="aggregation" class="form-label">Aggregate Using</label>
+    <select id="aggregation" name="aggregation" class="form-input">
+        <option value="average">Average</option>
+        <option value="max">Max</option>
+        <option value="min">Min</option>
+    </select>
+</div>
+
+<script>
+    document.addEventListener('DOMContentLoaded', () => {
+        const historyWeeksInput = document.getElementById('historyWeeks');
+        const aggregationRow = document.getElementById('aggregationRow');
+
+        function updateAggregationVisibility() {
+            aggregationRow.style.display = (parseInt(historyWeeksInput.value, 10) || 1) > 1 ? '' : 'none';
+        }
+        historyWeeksInput.addEventListener('input', updateAggregationVisibility);
+
+        if (loadPluginSettings) {
+            document.getElementById('title').value = pluginSettings.title || '';
+
+            const persistentMonitoring = pluginSettings.persistentMonitoring === 'true' || pluginSettings.persistentMonitoring === true;
+            document.getElementById('persistentMonitoring').checked = persistentMonitoring;
+            document.getElementById('persistentMonitoring').value = persistentMonitoring ? 'true' : 'false';
+
+            document.getElementById('gatewayIp').value = pluginSettings.gatewayIp || '';
+            document.getElementById('minOutageSeconds').value = pluginSettings.minOutageSeconds || 2;
+            document.getElementById('weekStart').value = pluginSettings.weekStart || 'sunday';
+            historyWeeksInput.value = pluginSettings.historyWeeks || 4;
+            document.getElementById('aggregation').value = pluginSettings.aggregation || 'average';
+        }
+        updateAggregationVisibility();
+    });
+</script>

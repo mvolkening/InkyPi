@@ -1,0 +1,39 @@
+{% extends "plugin.html" %}
+
+{% block content %}
+<div class="scoreboard-frame theme-{{ theme }}"
+    {% if background_data_uri %}style="background-image: url('{{ background_data_uri }}');"{% endif %}>
+    <div class="scoreboard-panel" style="--outline-width: {{ outline_width }}px; --outline-color: {{ outline_color }};">
+        <div class="scoreboard-header">
+            <h1 class="scoreboard-title">{{ title }}</h1>
+            {% if game_filter %}<div class="scoreboard-subtitle">{{ game_filter }}</div>{% endif %}
+        </div>
+
+        {% if leaderboard %}
+        <div class="scoreboard-list">
+            {% for entry in leaderboard %}
+            <div class="scoreboard-row rank-{{ entry.rank }}">
+                <div class="rank-badge">
+                    {% if entry.medal %}<span class="rank-icon">{{ entry.medal }}</span>{% endif %}
+                    <span class="rank-number">{{ entry.rank }}</span>
+                </div>
+                <div class="player-name">{{ entry.name }}</div>
+                <div class="player-breakdown">{{ entry.wins }}-{{ entry.seconds }}-{{ entry.thirds }}</div>
+                <div class="player-points">{{ entry.points }}</div>
+            </div>
+            {% endfor %}
+        </div>
+        {% else %}
+        <div class="scoreboard-empty">
+            <p>No results recorded yet.</p>
+            <p class="scoreboard-empty-sub">Scores will appear here once your Google Form/Sheet has game results.</p>
+        </div>
+        {% endif %}
+
+        <div class="scoreboard-footer">
+            <span>{{ games_counted }} game{{ '' if games_counted == 1 else 's' }} recorded</span>
+            <span>Updated {{ last_refresh_time }}</span>
+        </div>
+    </div>
+</div>
+{% endblock %}
