@@ -27,7 +27,7 @@ class Calendar(BasePlugin):
 
         if not view:
             raise RuntimeError("View is required")
-        elif view not in ["timeGridDay", "timeGridWeek", "dayGridMonth", "listMonth"]:
+        elif view not in ["timeGridDay", "timeGridWeek", "dayGrid", "dayGridMonth", "listMonth"]:
             raise RuntimeError("Invalid view")
 
         if not calendar_urls:
@@ -46,9 +46,10 @@ class Calendar(BasePlugin):
 
         current_dt = datetime.now(tz)
         start, end = self.get_view_range(view, current_dt, settings)
+        logger.debug(f"Fetching events for {start} --> [{current_dt}] --> {end}")
         events = self.fetch_ics_events(calendar_urls, calendar_colors, tz, start, end)
         if not events:
-            logger.warn("No events found for ics url")
+            logger.warning("No events found for ics url")
 
         if view == 'timeGridWeek' and settings.get("displayPreviousDays") != "true":
             view = 'timeGrid'
@@ -61,12 +62,6 @@ class Calendar(BasePlugin):
             "plugin_settings": settings,
             "time_format": time_format,
             "font_scale": FONT_SIZES.get(settings.get("fontSize", "normal")),
-            # Vendored locally rather than loaded from a CDN: this HTML is rendered
-            # by a fresh headless-Chromium process on the device itself, so a CDN
-            # fetch here depends on the device's own internet being up at that
-            # instant. A slow/failed fetch doesn't raise an error - the page still
-            # loads, FullCalendar just never runs, producing a silently blank screenshot.
-            "fullcalendar_js_path": resolve_path(os.path.join("static", "scripts", "fullcalendar", "index.global.min.js")),
         }
 
         image = self.render_image(dimensions, "calendar.html", "calendar.css", template_params)
@@ -111,6 +106,9 @@ class Calendar(BasePlugin):
                 start = current_dt - timedelta(days=offset)
                 start = datetime(start.year, start.month, start.day)
             end = start + timedelta(days=7)
+        elif view == "dayGrid":
+            start = current_dt - timedelta(weeks=1)
+            end = current_dt + timedelta(weeks=int(settings.get("displayWeeks") or 4))
         elif view == "dayGridMonth":
             start = datetime(current_dt.year, current_dt.month, 1) - timedelta(weeks=1)
             end = datetime(current_dt.year, current_dt.month, 1) + timedelta(weeks=6)
@@ -140,8 +138,11 @@ class Calendar(BasePlugin):
         return start, end, all_day
 
     def fetch_calendar(self, calendar_url):
+        # workaround for webcal urls
+        if calendar_url.startswith("webcal://"):
+            calendar_url = calendar_url.replace("webcal://", "https://")
         try:
-            response = requests.get(calendar_url)
+            response = requests.get(calendar_url, timeout=30)
             response.raise_for_status()
             return icalendar.Calendar.from_ical(response.text)
         except Exception as e:

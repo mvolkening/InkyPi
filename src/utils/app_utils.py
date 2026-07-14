@@ -83,9 +83,9 @@ def get_font(font_name, font_size=50, font_weight="normal"):
             font_path = resolve_path(os.path.join("static", "fonts", font_entry["file"]))
             return ImageFont.truetype(font_path, font_size)
         else:
-            logger.warn(f"Requested font weight not found: font_name={font_name}, font_weight={font_weight}")
+            logger.warning(f"Requested font weight not found: font_name={font_name}, font_weight={font_weight}")
     else:
-        logger.warn(f"Requested font not found: font_name={font_name}")
+        logger.warning(f"Requested font not found: font_name={font_name}")
 
     return None
 
@@ -110,7 +110,7 @@ def get_font_families():
 def generate_startup_image(dimensions=(800,480)):
     bg_color = (255,255,255)
     text_color = (0,0,0)
-    width,height = dimensions
+    width, height = dimensions
 
     hostname = socket.gethostname()
     ip = get_ip_address()
@@ -123,7 +123,18 @@ def generate_startup_image(dimensions=(800,480)):
 
     text = f"To get started, visit http://{hostname}.local"
     text_font_size = width * 0.032
-    image_draw.text((width/2, height*3/4), text, anchor="mm", fill=text_color, font=get_font("Jost", text_font_size))
+
+    # Draw the instructions
+    y_text = height * 3 / 4
+    image_draw.text((width/2, y_text), text, anchor="mm", fill=text_color, font=get_font("Jost", text_font_size))
+
+    # Draw the IP on a line below
+    ip_text = f"or http://{ip}"
+    ip_text_font_size = width * 0.032
+    bbox = image_draw.textbbox((0, 0), text, font=get_font("Jost", text_font_size))
+    text_height = bbox[3] - bbox[1]
+    ip_y = y_text + text_height * 1.35
+    image_draw.text((width/2, ip_y), ip_text, anchor="mm", fill=text_color, font=get_font("Jost", ip_text_font_size))
 
     return image
 
@@ -135,7 +146,7 @@ def parse_form(request_form):
     return request_dict
 
 def handle_request_files(request_files, form_data={}):
-    allowed_file_extensions = {'pdf', 'png', 'jpg', 'jpeg', 'gif', 'webp'}
+    allowed_file_extensions = {'pdf', 'png', 'avif', 'jpg', 'jpeg', 'gif', 'webp', 'heif', 'heic'}
     file_location_map = {}
     # handle existing file locations being provided as part of the form data
     for key in set(request_files.keys()):
@@ -165,7 +176,7 @@ def handle_request_files(request_files, form_data={}):
                     img = ImageOps.exif_transpose(img)
                     img.save(file_path)
             except Exception as e:
-                logger.warn(f"EXIF processing error for {file_name}: {e}")
+                logger.warning(f"EXIF processing error for {file_name}: {e}")
                 file.save(file_path)
         else:
             # Directly save non-JPEG files

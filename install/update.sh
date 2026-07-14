@@ -19,6 +19,10 @@ INSTALL_PATH="/usr/local/$APPNAME"
 BINPATH="/usr/local/bin"
 VENV_PATH="$INSTALL_PATH/venv_$APPNAME"
 
+SERVICE_FILE="$APPNAME.service"
+SERVICE_FILE_SOURCE="$SCRIPT_DIR/$SERVICE_FILE"
+SERVICE_FILE_TARGET="/etc/systemd/system/$SERVICE_FILE"
+
 APT_REQUIREMENTS_FILE="$SCRIPT_DIR/debian-requirements.txt"
 PIP_REQUIREMENTS_FILE="$SCRIPT_DIR/requirements.txt"
 
@@ -29,6 +33,43 @@ echo_success() {
 echo_error() {
   echo -e "$1 [\e[31m\xE2\x9C\x98\e[0m]\n"
 }
+
+setup_zramswap_service() {
+  echo "Enabling and starting zramswap service."
+  sudo apt-get install -y zram-tools > /dev/null
+  echo -e "ALGO=zstd\nPERCENT=60" | sudo tee /etc/default/zramswap > /dev/null
+  sudo systemctl enable --now zramswap
+}
+
+setup_earlyoom_service() {
+  echo "Enabling and starting earlyoom service."
+  sudo apt-get install -y earlyoom > /dev/null
+  sudo systemctl enable --now earlyoom
+}
+
+update_app_service() {
+  echo "Updating $APPNAME systemd service."
+  if [ -f "$SERVICE_FILE_SOURCE" ]; then
+    cp "$SERVICE_FILE_SOURCE" "$SERVICE_FILE_TARGET"
+    echo "Restarting $APPNAME service."
+    sudo systemctl daemon-reload
+    sudo systemctl restart $SERVICE_FILE
+  else
+    echo_error "ERROR: Service file $SERVICE_FILE_SOURCE not found!"
+    exit 1
+  fi
+}
+
+update_cli() {
+  cp -r "$SCRIPT_DIR/cli" "$INSTALL_PATH/"
+  sudo chmod +x "$INSTALL_PATH/cli/"*
+}
+
+# Get OS release number, e.g. 11=Bullseye, 12=Bookworm, 13=Trixe
+get_os_version() {
+  echo "$(lsb_release -sr)"
+}
+
 
 # Ensure script is run with sudo
 if [ "$EUID" -ne 0 ]; then
@@ -45,11 +86,14 @@ else
   exit 1
 fi
 
-echo "Starting zramswap service."
-echo -e "ALGO=zstd\nPERCENT=60" | sudo tee /etc/default/zramswap > /dev/null
-sudo systemctl enable --now zramswap
-echo "Starting earlyoom service."
-sudo systemctl enable --now earlyoom
+# check OS version for Bookworm to setup zramswap
+if [[ $(get_os_version) = "12" ]] ; then
+  echo "OS version is Bookworm - setting up zramswap"
+  setup_zramswap_service
+else
+  echo "OS version is not Bookworm - skipping zramswap setup."
+fi
+setup_earlyoom_service
 
 # Check if virtual environment exists
 if [ ! -d "$VENV_PATH" ]; then
@@ -77,8 +121,10 @@ echo "Updating executable in ${BINPATH}/$APPNAME"
 cp $SCRIPT_DIR/inkypi $BINPATH/
 sudo chmod +x $BINPATH/$APPNAME
 
-echo "Restarting $APPNAME service."
-sudo systemctl daemon-reload
-sudo systemctl restart $APPNAME.service
+echo "Update JS and CSS files"
+bash $SCRIPT_DIR/update_vendors.sh > /dev/null
+
+update_app_service
+update_cli
 
 echo_success "Update completed."

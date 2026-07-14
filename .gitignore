@@ -168,3 +168,10 @@ mock_display_output/
 
 # Network Monitor plugin's ping history database (runtime data, not source)
 src/plugins/network_monitor/data/
+
+# IDE files
+.idea
+
+# Static Files added by install/update_vendors.sh
+/src/static/scripts/
+/src/static/styles/

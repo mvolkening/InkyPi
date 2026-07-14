@@ -17,8 +17,8 @@
 <div class="form-group">
     <label for="weatherProvider" class="form-label">Weather Provider:</label>
     <select id="weatherProvider" name="weatherProvider" class="form-input" onchange="updateTitleOptions(this.value)">
-        <option value="OpenWeatherMap">OpenWeatherMap</option>
         <option value="OpenMeteo">Open-Meteo</option>
+        <option value="OpenWeatherMap">OpenWeatherMap</option>
     </select>
 
     <label for="units" class="form-label">Units:</label>
@@ -64,11 +64,25 @@
         <input type="checkbox" id="displayRain" name="displayRain" onclick="this.value=this.checked ? 'true' : 'false';">
         <span>Rain Amount</span>
     </div>
+	
 
     <div class="form-group">
         <input type="checkbox" id="moonPhase" name="moonPhase" onclick="this.value=this.checked ? 'true' : 'false';">
         <span>Moon Phase</span>
     </div>
+	
+	<div class="form-group">
+		<input type="checkbox" id="displayGraphIcons" name="displayGraphIcons" onclick="this.value=this.checked ? 'true' : 'false';">
+		<span>Graph icons every</span>
+		<select id="graphIconStep" name="graphIconStep" class="form-input">
+			<option value="1">1</option>
+			<option value="2" selected>2</option>
+			<option value="4">4</option>
+			<option value="6">6</option>
+			<option value="12">12</option>
+		</select>
+		<span>hours</span>
+	</div>
 
     <div class="form-group">
         <input type="checkbox" id="displayForecast" name="displayForecast" onclick="this.value=this.checked ? 'true' : 'false';">
@@ -78,7 +92,7 @@
             <option value=5>5</option>
             <option value=7>7</option>
         </select>
-        days
+        <span>days</span>
     </div>
 
     <div class="form-group">
@@ -110,6 +124,7 @@
         const customTitleInput = document.getElementById('customTitle');
         const titleTimeZone = document.getElementById('weatherTimeZone');
         const titleTimeZoneLabel = document.querySelector('label[for="weatherTimeZone"]');
+        const apiKeyLabel = document.querySelector('.api-key-label');
 
         if (provider === 'OpenMeteo') {
             // Hide or disable "Location" radio option
@@ -124,6 +139,9 @@
             titleCustomRadio.checked = true;
             titleCustomRadio.disabled = false;
             customTitleInput.disabled = false;
+
+            // Hide API Key required label for Open-Meteo
+            if (apiKeyLabel) apiKeyLabel.style.display = 'none';
         } else {
             // Show and enable both options
             titleLocationRadio.style.display = '';
@@ -136,6 +154,9 @@
             titleTimeZone.style.display = '';
             titleTimeZoneLabel.style.display = '';
             titleTimeZone.disabled = false;
+
+            // Show API Key required label for OpenWeatherMap
+            if (apiKeyLabel) apiKeyLabel.style.display = '';
         }
     }
 
@@ -152,7 +173,7 @@
         let longitude = +$longitude.value;
         let zoom = latitude && longitude ? 4.5 : 2.5;
         let selectedTitle = 'location';
-        let weatherProvider = 'OpenWeatherMap';
+        let weatherProvider = 'OpenMeteo';
 
         let map, marker;
 
@@ -196,6 +217,9 @@
 			document.getElementById('displayRain').checked = pluginSettings.displayRain;
             document.getElementById('displayRain').value = pluginSettings.displayRain;
 			
+			document.getElementById('displayGraphIcons').checked = pluginSettings.displayGraphIcons;
+            document.getElementById('displayGraphIcons').value = pluginSettings.displayGraphIcons;
+			
             document.getElementById('displayForecast').checked = pluginSettings.displayForecast;
             document.getElementById('displayForecast').value = pluginSettings.displayForecast;
 
@@ -207,7 +231,7 @@
             document.getElementById('weatherTimeZone').value = pluginSettings.weatherTimeZone;
             
             selectedTitle = pluginSettings.titleSelection || 'location';
-            weatherProvider = pluginSettings.weatherProvider || 'OpenWeatherMap';
+            weatherProvider = pluginSettings.weatherProvider || 'OpenMeteo';
 
             document.getElementById('customTitle').value = pluginSettings.customTitle || '';
         } else {
@@ -221,10 +245,13 @@
             document.getElementById('displayGraph').value = "true";
 			document.getElementById('displayRain').checked = false;
             document.getElementById('displayRain').value = "false";
+			document.getElementById('displayGraphIcons').checked = false;
+			document.getElementById('displayGraphIcons').value = "false";
             document.getElementById('displayForecast').checked = true;
             document.getElementById('displayForecast').value = "true";
             document.getElementById('forecastDays').value = 7;
             document.getElementById('moonPhase').checked = false;
+			document.getElementById('moonPhase').value = "false";
             document.getElementById('weatherTimeZone').value = "locationTimeZone";
         }
 

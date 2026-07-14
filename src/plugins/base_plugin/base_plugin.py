@@ -2,6 +2,7 @@ import logging
 import os
 from utils.app_utils import resolve_path, get_fonts
 from utils.image_utils import take_screenshot_html
+from utils.image_loader import AdaptiveImageLoader
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 from pathlib import Path
 import asyncio
@@ -9,6 +10,7 @@ import base64
 
 logger = logging.getLogger(__name__)
 
+STATIC_DIR = resolve_path("static")
 PLUGINS_DIR = resolve_path("plugins")
 BASE_PLUGIN_DIR =  os.path.join(PLUGINS_DIR, "base_plugin")
 BASE_PLUGIN_RENDER_DIR = os.path.join(BASE_PLUGIN_DIR, "render")
@@ -37,6 +39,9 @@ class BasePlugin:
     def __init__(self, config, **dependencies):
         self.config = config
 
+        # Initialize adaptive image loader for device-aware image processing
+        self.image_loader = AdaptiveImageLoader()
+
         self.render_dir = self.get_plugin_dir("render")
         if os.path.exists(self.render_dir):
             # instantiate jinja2 env with base plugin and current plugin render directories
@@ -56,6 +61,17 @@ class BasePlugin:
         should survive a reboot without waiting for a first refresh) can override this."""
         pass
 
+    def cleanup(self, settings):
+        """Optional cleanup method that plugins can override to delete associated resources.
+
+        Called when a plugin instance is deleted. Plugins should override this to clean up
+        any files, external resources, or other data associated with the plugin instance.
+
+        Args:
+            settings: The plugin instance's settings dict, which may contain file paths or other resources
+        """
+        pass  # Default implementation does nothing
+
     def get_plugin_id(self):
         return self.config.get("id")
 
@@ -71,7 +87,7 @@ class BasePlugin:
         settings_path = self.get_plugin_dir("settings.html")
         if Path(settings_path).is_file():
             template_params["settings_template"] = f"{self.get_plugin_id()}/settings.html"
-        
+
         template_params['frame_styles'] = FRAME_STYLES
         return template_params
 
@@ -86,6 +102,7 @@ class BasePlugin:
         template_params["width"] = dimensions[0]
         template_params["height"] = dimensions[1]
         template_params["font_faces"] = get_fonts()
+        template_params["static_dir"] = STATIC_DIR
 
         # load and render the given html template
         template = self.env.get_template(html_file)

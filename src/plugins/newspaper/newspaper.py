@@ -27,13 +27,18 @@ class Newspaper(BasePlugin):
             image_url = FREEDOM_FORUM_URL.format(date.day, newspaper_slug)
             image = get_image(image_url)
             if image:
-                logging.info(f"Found {newspaper_slug} front cover for {date.strftime('%Y-%m-%d')}")
+                logger.info(f"Found {newspaper_slug} front cover for {date.strftime('%Y-%m-%d')}")
                 break
 
         if image:
             # expand height if newspaper is wider than resolution
             img_width, img_height = image.size
-            desired_width, desired_height = device_config.get_resolution()
+
+            dimensions = device_config.get_resolution()
+            if device_config.get_config("orientation") == "horizontal":
+                dimensions = dimensions[::-1]
+
+            desired_width, desired_height = dimensions
 
             img_ratio = img_width / img_height
             desired_ratio = desired_width / desired_height
