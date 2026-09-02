@@ -1,0 +1,249 @@
+<div class="form-group">
+    <label for="title" class="form-label">Title</label>
+    <input type="text" id="title" name="title" placeholder="Home Power Monitor" class="form-input">
+</div>
+
+<div class="form-group">
+    <span>
+        Reads PowerSum, PowerA, PowerB, VoltageA, VoltageB, Frequency, and PowerFactorA/B from an InfluxDB v2 bucket
+        (e.g. a whole-home energy monitor with two split-phase legs) and shows the current draw, 6h/24h history, a
+        30-day daily-energy view, and live Voltage/Frequency/Power Factor gauges. If your meter also reports a
+        cumulative Total Energy counter, it's used to make daily and Time-of-Use energy/cost figures more accurate.
+        Store your InfluxDB API token in the .env file as <code>INFLUXDB_TOKEN</code> (see the "Requires API Key"
+        note above).
+    </span>
+</div>
+
+<div class="form-group nowrap">
+    <label for="influxUrl" class="form-label">InfluxDB URL</label>
+    <input type="text" id="influxUrl" name="influxUrl" class="form-input" value="http://PiDisplay.home.local:8086" required>
+    <span title="Base URL of your InfluxDB v2 instance, including scheme and port (e.g. http://192.168.1.40:8086).">&#9432;</span>
+</div>
+
+<div class="form-group nowrap">
+    <label for="influxOrg" class="form-label">Organization</label>
+    <input type="text" id="influxOrg" name="influxOrg" class="form-input" value="none" required>
+    <span title="Your InfluxDB organization name, or its Organization ID (found under Settings > Organizations in the InfluxDB UI). The ID is safer to use since org names must match exactly, including spacing/punctuation/case.">&#9432;</span>
+</div>
+
+<div class="form-group nowrap">
+    <label for="influxBucket" class="form-label">Bucket</label>
+    <input type="text" id="influxBucket" name="influxBucket" class="form-input" value="PowerMeter">
+</div>
+
+<div class="form-group nowrap">
+    <label for="influxMeasurement" class="form-label">Measurement (optional)</label>
+    <input type="text" id="influxMeasurement" name="influxMeasurement" class="form-input" placeholder="leave blank to match any measurement">
+    <span title="Only needed if the bucket contains other measurements that also happen to use the same field names.">&#9432;</span>
+</div>
+
+<div class="form-group nowrap">
+    <label for="voltageAField" class="form-label">Voltage A Field</label>
+    <input type="text" id="voltageAField" name="voltageAField" class="form-input" value="VoltageA">
+</div>
+
+<div class="form-group nowrap">
+    <label for="voltageBField" class="form-label">Voltage B Field</label>
+    <input type="text" id="voltageBField" name="voltageBField" class="form-input" value="VoltageB">
+</div>
+
+<div class="form-group nowrap">
+    <label for="frequencyField" class="form-label">Frequency Field</label>
+    <input type="text" id="frequencyField" name="frequencyField" class="form-input" value="Frequency">
+</div>
+
+<div class="form-group nowrap">
+    <label for="powerFactorAField" class="form-label">Power Factor A Field</label>
+    <input type="text" id="powerFactorAField" name="powerFactorAField" class="form-input" value="PowerFactorA">
+</div>
+
+<div class="form-group nowrap">
+    <label for="powerFactorBField" class="form-label">Power Factor B Field</label>
+    <input type="text" id="powerFactorBField" name="powerFactorBField" class="form-input" value="PowerFactorB">
+</div>
+
+<div class="form-group nowrap">
+    <label for="useTotalEnergy" class="form-label">Use Total Energy Counter:</label>
+    <div class="toggle-container">
+        <input type="checkbox" id="useTotalEnergy" name="useTotalEnergy" class="toggle-checkbox" value="false" onclick="this.value=this.checked ? 'true' : 'false';">
+        <label for="useTotalEnergy" class="toggle-label"></label>
+    </div>
+    <span title="Off by default. When on, daily and Time-of-Use energy/cost are computed from the meter's cumulative Total Energy counter instead of integrating power samples, which is more accurate - but only if that counter is actually reliable. A stuck or occasionally-corrupted readout can silently inflate results, so leave this off until you've verified the counter is trustworthy. Falls back to the power-sample estimate automatically whenever this is off or the counter has no usable data.">&#9432;</span>
+</div>
+
+<div class="form-group nowrap">
+    <label for="totalEnergyField" class="form-label">Total Energy Field (optional)</label>
+    <input type="text" id="totalEnergyField" name="totalEnergyField" class="form-input" value="TotalEnergy">
+</div>
+
+<div class="form-group nowrap">
+    <label for="totalEnergyUnit" class="form-label">Total Energy Unit</label>
+    <select id="totalEnergyUnit" name="totalEnergyUnit" class="form-input">
+        <option value="Wh">Watt-hours (Wh)</option>
+        <option value="kWh">Kilowatt-hours (kWh)</option>
+    </select>
+    <span title="Must match the unit of your meter's Total Energy counter. A mismatch makes every energy/cost figure exactly 1000x off; the plugin detects this by cross-checking against the power readings and auto-corrects it (logging a warning), but set it correctly here to silence the warning.">&#9432;</span>
+</div>
+
+<div class="form-group nowrap">
+    <label for="skipTlsVerify" class="form-label">Skip TLS Certificate Verification:</label>
+    <div class="toggle-container">
+        <input type="checkbox" id="skipTlsVerify" name="skipTlsVerify" class="toggle-checkbox" value="false" onclick="this.value=this.checked ? 'true' : 'false';">
+        <label for="skipTlsVerify" class="toggle-label"></label>
+    </div>
+    <span title="Only enable this if your InfluxDB instance uses a self-signed HTTPS certificate on your local network.">&#9432;</span>
+</div>
+
+<div class="form-group nowrap">
+    <label for="elevatedThresholdW" class="form-label">Elevated Usage Threshold</label>
+    <input type="number" id="elevatedThresholdW" name="elevatedThresholdW" class="form-input" min="0" max="50000" step="50" value="1500">W
+    <span title="Current power draw at or above this turns the status badge yellow.">&#9432;</span>
+</div>
+
+<div class="form-group nowrap">
+    <label for="highThresholdW" class="form-label">High Usage Threshold</label>
+    <input type="number" id="highThresholdW" name="highThresholdW" class="form-input" min="0" max="50000" step="50" value="3000">W
+    <span title="Current power draw at or above this turns the status badge red.">&#9432;</span>
+</div>
+
+<div class="form-group nowrap">
+    <label for="nominalVoltage" class="form-label">Nominal Voltage</label>
+    <input type="number" id="nominalVoltage" name="nominalVoltage" class="form-input" min="1" step="1" value="120">V
+    <span title="Center of the voltage gauge. The gauge range is +/-10% of this value (e.g. 120V gives a 108-132V gauge).">&#9432;</span>
+</div>
+
+<div class="form-group nowrap">
+    <label for="nominalFrequency" class="form-label">Nominal Frequency</label>
+    <input type="number" id="nominalFrequency" name="nominalFrequency" class="form-input" min="1" step="0.1" value="60">Hz
+    <span title="Center of the frequency gauge (60Hz for North America, 50Hz elsewhere). The gauge range is +/-2Hz of this value.">&#9432;</span>
+</div>
+
+<div class="form-group nowrap">
+    <label for="dailyBudgetKwh" class="form-label">Daily Budget (optional)</label>
+    <input type="number" id="dailyBudgetKwh" name="dailyBudgetKwh" class="form-input" min="0" step="0.1" placeholder="auto">
+    <span title="Used to color the daily-energy bar chart (green/yellow/red). Leave blank to auto-scale relative to this home's own trailing average instead of a fixed number.">&#9432;</span>
+</div>
+
+<div class="form-group nowrap">
+    <label for="currencySymbol" class="form-label">Currency Symbol</label>
+    <input type="text" id="currencySymbol" name="currencySymbol" class="form-input" value="$" maxlength="3">
+</div>
+
+<div class="form-group nowrap">
+    <label for="costModel" class="form-label">Cost Model</label>
+    <select id="costModel" name="costModel" class="form-input">
+        <option value="flat">Flat Rate</option>
+        <option value="tou">Time-of-Use (Ontario-style)</option>
+    </select>
+</div>
+
+<div class="form-group nowrap" id="flatRateRow">
+    <label for="pricePerKwh" class="form-label">Price per kWh (optional)</label>
+    <input type="number" id="pricePerKwh" name="pricePerKwh" class="form-input" min="0" step="0.001" placeholder="0.15">
+    <span title="If set, shows today's estimated cost so far based on today's measured energy use.">&#9432;</span>
+</div>
+
+<div class="form-group">
+    <span id="touExplanation" style="display:none;">
+        Time-of-Use pricing follows Ontario's fixed schedule: weekends and Ontario's ~9 statutory holidays (New
+        Year's, Family Day, Good Friday, Victoria Day, Canada Day, Labour Day, Thanksgiving, Christmas, Boxing Day)
+        are Off-Peak all day - calculated automatically every year, including moving dates like Good Friday, so
+        nothing needs to be maintained here. Weekdays follow a Summer (May 1 - Oct 31) or Winter (Nov 1 - Apr 30)
+        pattern: Summer is Mid-Peak 7-11am, On-Peak 11am-5pm, Mid-Peak 5-7pm, Off-Peak overnight; Winter is On-Peak
+        7-11am, Mid-Peak 11am-5pm, On-Peak 5-7pm, Off-Peak overnight. Only the three rates below need updating when
+        your utility changes its pricing (typically each November 1st and May 1st) - the schedule itself is fixed
+        by the Ontario Energy Board and doesn't change.
+    </span>
+</div>
+
+<div class="form-group nowrap tou-row" style="display:none;">
+    <label for="onPeakRate" class="form-label">On-Peak Rate</label>
+    <input type="number" id="onPeakRate" name="onPeakRate" class="form-input" min="0" step="0.001" value="20.3">&cent;/kWh
+    <span title="Defaults to Ontario's current On-Peak rate. Update this when your utility changes its TOU pricing (typically each Nov 1st and May 1st).">&#9432;</span>
+</div>
+
+<div class="form-group nowrap tou-row" style="display:none;">
+    <label for="midPeakRate" class="form-label">Mid-Peak Rate</label>
+    <input type="number" id="midPeakRate" name="midPeakRate" class="form-input" min="0" step="0.001" value="15.7">&cent;/kWh
+</div>
+
+<div class="form-group nowrap tou-row" style="display:none;">
+    <label for="offPeakRate" class="form-label">Off-Peak Rate</label>
+    <input type="number" id="offPeakRate" name="offPeakRate" class="form-input" min="0" step="0.001" value="9.8">&cent;/kWh
+</div>
+
+<div class="form-group nowrap tou-row" style="display:none;">
+    <label for="statutoryHolidays" class="form-label">Extra Off-Peak Dates (optional)</label>
+    <input type="text" id="statutoryHolidays" name="statutoryHolidays" class="form-input" placeholder="e.g. 2026-12-24 (company shutdown day)">
+    <span title="Ontario's statutory holidays are already applied automatically. Add any extra dates here (e.g. a company-specific closure) that should also count as Off-Peak all day, comma-separated YYYY-MM-DD.">&#9432;</span>
+</div>
+
+<script>
+    function updateCostModelVisibility() {
+        const isTou = document.getElementById('costModel').value === 'tou';
+        document.getElementById('flatRateRow').style.display = isTou ? 'none' : '';
+        document.getElementById('touExplanation').style.display = isTou ? '' : 'none';
+        document.querySelectorAll('.tou-row').forEach(el => el.style.display = isTou ? '' : 'none');
+    }
+
+    document.addEventListener('DOMContentLoaded', () => {
+        document.getElementById('costModel').addEventListener('change', updateCostModelVisibility);
+
+        if (loadPluginSettings) {
+            document.getElementById('title').value = pluginSettings.title || '';
+            document.getElementById('influxUrl').value = pluginSettings.influxUrl || 'http://PiDisplay.home.local:8086';
+            document.getElementById('influxOrg').value = pluginSettings.influxOrg || 'none';
+            document.getElementById('influxBucket').value = pluginSettings.influxBucket || 'PowerMeter';
+            document.getElementById('influxMeasurement').value = pluginSettings.influxMeasurement || '';
+            document.getElementById('voltageAField').value = pluginSettings.voltageAField || 'VoltageA';
+            document.getElementById('voltageBField').value = pluginSettings.voltageBField || 'VoltageB';
+            document.getElementById('frequencyField').value = pluginSettings.frequencyField || 'Frequency';
+            document.getElementById('powerFactorAField').value = pluginSettings.powerFactorAField || 'PowerFactorA';
+            document.getElementById('powerFactorBField').value = pluginSettings.powerFactorBField || 'PowerFactorB';
+            document.getElementById('totalEnergyField').value = pluginSettings.totalEnergyField || 'TotalEnergy';
+            document.getElementById('totalEnergyUnit').value = pluginSettings.totalEnergyUnit || 'Wh';
+
+            const useTotalEnergy = pluginSettings.useTotalEnergy === 'true' || pluginSettings.useTotalEnergy === true;
+            document.getElementById('useTotalEnergy').checked = useTotalEnergy;
+            document.getElementById('useTotalEnergy').value = useTotalEnergy ? 'true' : 'false';
+
+            const skipTlsVerify = pluginSettings.skipTlsVerify === 'true' || pluginSettings.skipTlsVerify === true;
+            document.getElementById('skipTlsVerify').checked = skipTlsVerify;
+            document.getElementById('skipTlsVerify').value = skipTlsVerify ? 'true' : 'false';
+
+            document.getElementById('elevatedThresholdW').value = pluginSettings.elevatedThresholdW || 1500;
+            document.getElementById('highThresholdW').value = pluginSettings.highThresholdW || 3000;
+            document.getElementById('nominalVoltage').value = pluginSettings.nominalVoltage || 120;
+            document.getElementById('nominalFrequency').value = pluginSettings.nominalFrequency || 60;
+            document.getElementById('dailyBudgetKwh').value = pluginSettings.dailyBudgetKwh || '';
+            document.getElementById('currencySymbol').value = pluginSettings.currencySymbol || '$';
+
+            document.getElementById('costModel').value = pluginSettings.costModel || 'flat';
+            document.getElementById('pricePerKwh').value = pluginSettings.pricePerKwh || '';
+            document.getElementById('onPeakRate').value = pluginSettings.onPeakRate || 20.3;
+            document.getElementById('midPeakRate').value = pluginSettings.midPeakRate || 15.7;
+            document.getElementById('offPeakRate').value = pluginSettings.offPeakRate || 9.8;
+            document.getElementById('statutoryHolidays').value = pluginSettings.statutoryHolidays || '';
+        } else {
+            document.getElementById('influxUrl').value = 'http://PiDisplay.home.local:8086';
+            document.getElementById('influxOrg').value = 'none';
+            document.getElementById('influxBucket').value = 'PowerMeter';
+            document.getElementById('voltageAField').value = 'VoltageA';
+            document.getElementById('voltageBField').value = 'VoltageB';
+            document.getElementById('frequencyField').value = 'Frequency';
+            document.getElementById('powerFactorAField').value = 'PowerFactorA';
+            document.getElementById('powerFactorBField').value = 'PowerFactorB';
+            document.getElementById('totalEnergyField').value = 'TotalEnergy';
+            document.getElementById('totalEnergyUnit').value = 'Wh';
+            document.getElementById('nominalVoltage').value = 120;
+            document.getElementById('nominalFrequency').value = 60;
+            document.getElementById('currencySymbol').value = '$';
+            document.getElementById('costModel').value = 'flat';
+            document.getElementById('onPeakRate').value = 20.3;
+            document.getElementById('midPeakRate').value = 15.7;
+            document.getElementById('offPeakRate').value = 9.8;
+        }
+
+        updateCostModelVisibility();
+    });
+</script>

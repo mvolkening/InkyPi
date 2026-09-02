@@ -1,0 +1,5 @@
+{
+    "display_name": "Home Power Monitor",
+    "id": "power_monitor",
+    "class": "PowerMonitor"
+}
