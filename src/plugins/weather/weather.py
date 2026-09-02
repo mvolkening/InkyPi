@@ -506,7 +506,7 @@ class Weather(BasePlugin):
         data_points.append({
             "label": "WindDeg",
             "measurement": weather.get('current', {}).get("wind_deg"),
-            "unit": UNITS[units]["deg"],
+            "unit": "°",
             "icon": self.get_plugin_dir('icons/wind.png')
         })
 
