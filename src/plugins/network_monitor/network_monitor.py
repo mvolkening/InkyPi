@@ -1,16 +1,12 @@
+import csv
+import io
 import logging
-import os
 import re
-import socket
-import sqlite3
-import struct
-import subprocess
-import sys
-import threading
 import time
 from datetime import datetime, timedelta
 
 import pytz
+import requests
 from PIL import Image, ImageDraw
 
 from plugins.base_plugin.base_plugin import BasePlugin
@@ -18,42 +14,26 @@ from utils.app_utils import get_font
 
 logger = logging.getLogger(__name__)
 
-# Failover hierarchy: try each external resolver in order and stop at the first
-# one that answers, so one provider dropping ICMP doesn't read as a real outage.
-# Cloudflare first (fast anycast backbone check), Google as the standard/most
-# widely-reachable fallback, Quad9 as a second, independently-routed fallback.
-EXTERNAL_HOSTS = ["1.1.1.1", "8.8.8.8", "9.9.9.9"]
-PING_INTERVAL_SECONDS = 1.0
-PING_TIMEOUT_SECONDS = 1.0
-# Used only as a connectivity/latency probe when raw ICMP sockets aren't available
-# (non-root, or non-Linux dev environments) - see _PingPoller._probe_host.
-TCP_FALLBACK_PORT = 53
+# Pinging and speed tests run on a separate, hard-wired Pi (see
+# scripts/pidisplay_netmon/) and are stored in its InfluxDB; this plugin only
+# reads that data back and draws it.
+DEFAULT_INFLUX_URL = "http://PiDisplay.home.local:8086"
+DEFAULT_INFLUX_ORG = "none"
+DEFAULT_RAW_BUCKET = "netmon_raw"
+DEFAULT_BUCKET = "netmon"
+SPEEDTEST_WINDOW_HOURS = 48
 
-# Only probed when every external host above has already failed, to tell apart a
-# local network/Wi-Fi problem (gateway also unreachable) from an ISP/backbone
-# outage (gateway fine, nothing external answers). Not on the hot path, so it's
-# fine that this is a little more expensive than the external-host probe.
-GATEWAY_PROBE_TIMEOUT_SECONDS = 1.0
-GATEWAY_TCP_PROBE_PORT = 80
-GATEWAY_REDETECT_INTERVAL_SECONDS = 300
+# (connect, read) timeouts for the LAN-hosted, Pi-backed InfluxDB.
+REQUEST_TIMEOUT = (5, 30)
 
-FLUSH_INTERVAL_SECONDS = 5
-FLUSH_BATCH_SIZE = 30
-# WAL mode normally auto-checkpoints on its own, but this is a 24/7 writer on a
-# Pi's SD card - an explicit periodic checkpoint bounds the WAL file's on-disk
-# size instead of trusting that nothing ever delays the automatic one.
-WAL_CHECKPOINT_INTERVAL_SECONDS = 60
-# Raw 1Hz samples are only needed to draw the 12h sparkline, so they're pruned far
-# sooner than the outage/gap episode tables, which back the 7-day histogram and
-# 4-week calendar and are tiny (one row per outage/restart, not one per second).
-RAW_RETENTION_SECONDS = 14 * 3600
-# Covers the calendar's fixed 4 weeks plus headroom for the histogram's
-# configurable history-weeks setting (capped at MAX_HISTORY_WEEKS).
-EPISODE_RETENTION_SECONDS = 95 * 24 * 3600
+# The daemon writes a ping sample every second; if the newest one is older than
+# this, the daemon (or its Pi) isn't running and the live status can't be trusted.
+STALE_SAMPLE_SECONDS = 30
+STATUS_LOOKBACK = "-1h"
+# Episode data (outages/gaps) is tiny, so it's fetched in one query covering the
+# calendar's 4 weeks plus the histogram's longest configurable history.
+EPISODE_LOOKBACK_DAYS = 100
 MAX_HISTORY_WEEKS = 12
-# A restart/reboot is detected by comparing "now" to the last recorded sample at
-# startup; a small slack avoids flagging the normal ~1s gap between ticks.
-STARTUP_GAP_THRESHOLD_SECONDS = 5
 
 # Fixed 6-color e-ink palette - all fills below are flat colors from this set,
 # deliberately with no gradients/alpha blending, which don't survive e-ink dithering.
@@ -67,410 +47,217 @@ COLOR_GREEN = "#428c46"
 DEFAULT_TITLE = "Internet Outage Monitor"
 
 
-def _detect_default_gateway():
-    """Best-effort local default-gateway lookup, used only for the local-vs-ISP
-    outage diagnostic. Returns None if it can't be determined (unsupported
-    platform, no default route, parsing failure, etc.) - the plugin still works
-    without it, it just can't tell a local outage apart from an ISP one."""
-    if sys.platform.startswith("linux"):
-        try:
-            with open("/proc/net/route") as f:
-                for line in f.readlines()[1:]:
-                    fields = line.split()
-                    if len(fields) >= 3 and fields[1] == "00000000":
-                        return socket.inet_ntoa(struct.pack("<L", int(fields[2], 16)))
-        except Exception:
-            logger.debug("Could not read default gateway from /proc/net/route", exc_info=True)
-        return None
+class InfluxQueryError(RuntimeError):
+    pass
 
+
+def _flux_escape(value):
+    return str(value).replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _parse_annotated_csv(text):
+    """Parses InfluxDB's "annotated CSV" query response into a list of row dicts,
+    skipping '#'-prefixed annotation lines and resetting the header on each blank
+    line (InfluxDB emits one header per result table)."""
+    rows = []
+    header = None
+    for row in csv.reader(io.StringIO(text)):
+        if not row or row == [""]:
+            header = None
+            continue
+        if row[0].startswith("#"):
+            continue
+        if header is None:
+            header = row
+            continue
+        rows.append(dict(zip(header, row)))
+    return rows
+
+
+def _parse_influx_time(value):
+    if not value:
+        return None
+    for fmt in ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ"):
+        try:
+            return int(datetime.strptime(value, fmt).replace(tzinfo=pytz.UTC).timestamp())
+        except ValueError:
+            continue
+    return None
+
+
+def _parse_float(value):
     try:
-        if os.name == "nt":
-            output = subprocess.run(["ipconfig"], capture_output=True, text=True, timeout=3).stdout
-            match = re.search(r"Default Gateway[ .:]+([\d.]+)", output)
-        else:
-            output = subprocess.run(["netstat", "-rn"], capture_output=True, text=True, timeout=3).stdout
-            match = re.search(r"^default\s+(\S+)", output, re.MULTILINE)
-        return match.group(1) if match else None
-    except Exception:
-        logger.debug("Could not determine default gateway", exc_info=True)
+        return float(value)
+    except (TypeError, ValueError):
         return None
 
 
-class _PingStore:
-    """Owns the sqlite database of ping samples and outage/gap episodes.
+def _parse_int(value):
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
 
-    Shared between the background poller thread (writer) and generate_image
-    (reader, possibly called from a different thread). Each thread gets its own
-    connection since sqlite3 connections aren't safe to share across threads.
-    """
 
-    def __init__(self, db_path):
-        self.db_path = db_path
-        self._local = threading.local()
-        self._last_checkpoint_mono = 0.0
-        os.makedirs(os.path.dirname(db_path), exist_ok=True)
-        conn = self._connect()
-        conn.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS pings (
-                ts INTEGER PRIMARY KEY,
-                rtt_ms REAL
-            );
-            CREATE TABLE IF NOT EXISTS outages (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                start_ts INTEGER NOT NULL,
-                end_ts INTEGER
-            );
-            CREATE TABLE IF NOT EXISTS gaps (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                start_ts INTEGER NOT NULL,
-                end_ts INTEGER NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS meta (
-                key TEXT PRIMARY KEY,
-                value TEXT
-            );
-            """
-        )
-        conn.execute(
-            "INSERT OR IGNORE INTO meta(key, value) VALUES ('first_started_ts', ?)",
-            (str(int(time.time())),),
-        )
-        conn.commit()
+def _to_rfc3339(ts):
+    return datetime.utcfromtimestamp(ts).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    def _connect(self):
-        conn = getattr(self._local, "conn", None)
-        if conn is None:
-            conn = sqlite3.connect(self.db_path, timeout=30)
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA synchronous=NORMAL")
-            self._local.conn = conn
-        return conn
 
-    def record_startup_gap(self):
-        conn = self._connect()
-        last_ts = conn.execute("SELECT MAX(ts) FROM pings").fetchone()[0]
-        now = int(time.time())
-        if last_ts is not None and now - last_ts > STARTUP_GAP_THRESHOLD_SECONDS:
-            conn.execute("INSERT INTO gaps(start_ts, end_ts) VALUES (?, ?)", (last_ts, now))
-            conn.commit()
-            logger.info("Detected a %ds gap in polling (restart/reboot); recorded as a gap episode.", now - last_ts)
+class _InfluxStore:
+    """Read-only view of the ping/outage/speed-test data the daemon writes to
+    InfluxDB, exposing the small query surface the drawing code needs. `load()`
+    prefetches live status and the low-volume episode data once per render so the
+    histogram, calendar and sparklines don't each re-query it."""
 
-    def flush_pings(self, rows):
-        if not rows:
-            return
-        conn = self._connect()
-        conn.executemany("INSERT OR IGNORE INTO pings(ts, rtt_ms) VALUES (?, ?)", rows)
-        conn.commit()
+    def __init__(self, url, org, token, raw_bucket, bucket, verify_ssl):
+        self.url = url.rstrip("/")
+        self.org = org
+        self.token = token
+        self.raw_bucket = raw_bucket
+        self.bucket = bucket
+        self.verify_ssl = verify_ssl
+        self._outages = []  # [(start_ts, end_ts, or None while still ongoing)]
+        self._gaps = []
+        self._first_started_ts = None
+        self.last_sample_ts = None
+        self.last_up = None
+        self.outage_scope = None
 
-    def insert_outage(self, start_ts, end_ts):
-        conn = self._connect()
-        conn.execute("INSERT INTO outages(start_ts, end_ts) VALUES (?, ?)", (start_ts, end_ts))
-        conn.commit()
-
-    def prune(self, now):
-        conn = self._connect()
-        conn.execute("DELETE FROM pings WHERE ts < ?", (now - RAW_RETENTION_SECONDS,))
-        conn.execute(
-            "DELETE FROM outages WHERE end_ts IS NOT NULL AND end_ts < ?",
-            (now - EPISODE_RETENTION_SECONDS,),
-        )
-        conn.execute("DELETE FROM gaps WHERE end_ts < ?", (now - EPISODE_RETENTION_SECONDS,))
-        conn.commit()
-        self._maybe_checkpoint(conn)
-
-    def _maybe_checkpoint(self, conn):
-        now_mono = time.monotonic()
-        if now_mono - self._last_checkpoint_mono < WAL_CHECKPOINT_INTERVAL_SECONDS:
-            return
-        self._last_checkpoint_mono = now_mono
+    def _query(self, flux):
+        headers = {
+            "Authorization": f"Token {self.token}",
+            "Content-Type": "application/vnd.flux",
+            "Accept": "application/csv",
+        }
+        # Org IDs are unambiguous 16-char hex strings; org names must match exactly.
+        org_param = {"orgID": self.org} if re.fullmatch(r"[0-9a-fA-F]{16}", self.org) else {"org": self.org}
         try:
-            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-        except sqlite3.Error:
-            logger.debug("WAL checkpoint failed", exc_info=True)
+            response = requests.post(
+                f"{self.url}/api/v2/query", params=org_param, headers=headers,
+                data=flux.encode("utf-8"), timeout=REQUEST_TIMEOUT, verify=self.verify_ssl,
+            )
+        except requests.RequestException as e:
+            raise InfluxQueryError(f"Could not reach InfluxDB at {self.url}: {e}")
+        if not 200 <= response.status_code < 300:
+            raise InfluxQueryError(f"InfluxDB query failed with status {response.status_code}: {response.text[:300]}")
+        return _parse_annotated_csv(response.text)
+
+    def _pivoted(self, measurement, start):
+        return self._query(
+            f'from(bucket: "{_flux_escape(self.bucket)}") |> range(start: {start}) '
+            f'|> filter(fn: (r) => r._measurement == "{measurement}") '
+            '|> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")'
+        )
+
+    def load(self):
+        """Fetches live status and all outage/gap episodes."""
+        rows = self._query(
+            f'from(bucket: "{_flux_escape(self.raw_bucket)}") |> range(start: {STATUS_LOOKBACK}) '
+            '|> filter(fn: (r) => r._measurement == "ping" and r._field == "up") |> last()'
+        )
+        if rows:
+            self.last_sample_ts = _parse_influx_time(rows[0].get("_time"))
+            self.last_up = _parse_int(rows[0].get("_value")) == 1
+
+        start = f"-{EPISODE_LOOKBACK_DAYS}d"
+        self._outages, self.outage_scope = [], None
+        for row in self._pivoted("outage", start):
+            start_ts, end_ts = _parse_influx_time(row.get("_time")), _parse_int(row.get("end_ts"))
+            if start_ts is None or end_ts is None:
+                continue
+            if end_ts == 0:  # daemon writes 0 while an outage is still open
+                end_ts = None
+                self.outage_scope = row.get("scope") or None
+            self._outages.append((start_ts, end_ts))
+
+        self._gaps = []
+        for row in self._pivoted("gap", start):
+            gap_start, gap_end = _parse_influx_time(row.get("_time")), _parse_int(row.get("end_ts"))
+            if gap_start is not None and gap_end is not None:
+                self._gaps.append((gap_start, gap_end))
+
+        rows = self._query(
+            f'from(bucket: "{_flux_escape(self.bucket)}") |> range(start: -400d) '
+            '|> filter(fn: (r) => r._measurement == "meta" and r._field == "first_started_ts") |> min()'
+        )
+        self._first_started_ts = _parse_int(rows[0].get("_value")) if rows else None
 
     def has_any_data(self):
-        conn = self._connect()
-        return conn.execute("SELECT 1 FROM pings LIMIT 1").fetchone() is not None
+        return self.last_sample_ts is not None
 
     def get_samples(self, since_ts, until_ts):
-        conn = self._connect()
-        rows = conn.execute(
-            "SELECT ts, rtt_ms FROM pings WHERE ts >= ? AND ts <= ? ORDER BY ts", (since_ts, until_ts)
-        ).fetchall()
-        return rows
-
-    def get_gaps(self, since_ts, until_ts):
-        conn = self._connect()
-        return conn.execute(
-            "SELECT start_ts, end_ts FROM gaps WHERE end_ts >= ? AND start_ts <= ?", (since_ts, until_ts)
-        ).fetchall()
+        """Mean RTT per time bucket (failed pings carry no rtt_ms, so they just
+        leave empty buckets). Aggregated server-side: a 12h window is ~43k raw
+        samples, far more than the chart has pixel columns."""
+        every = max(1, (until_ts - since_ts) // 700)
+        rows = self._query(
+            f'from(bucket: "{_flux_escape(self.raw_bucket)}") '
+            f'|> range(start: {_to_rfc3339(since_ts)}, stop: {_to_rfc3339(until_ts + 1)}) '
+            '|> filter(fn: (r) => r._measurement == "ping" and r._field == "rtt_ms") '
+            f'|> aggregateWindow(every: {every}s, fn: mean, createEmpty: false) '
+            '|> keep(columns: ["_time", "_value"])'
+        )
+        samples = []
+        for row in rows:
+            ts, value = _parse_influx_time(row.get("_time")), _parse_float(row.get("_value"))
+            if ts is not None and value is not None:
+                samples.append((ts, value))
+        samples.sort()
+        return samples
 
     def get_outages(self, since_ts, until_ts, now_ts):
-        conn = self._connect()
-        rows = conn.execute(
-            "SELECT start_ts, end_ts FROM outages WHERE (end_ts IS NULL OR end_ts >= ?) AND start_ts <= ?",
-            (since_ts, until_ts),
-        ).fetchall()
-        return [(start, end if end is not None else now_ts) for start, end in rows]
+        # An outage still open when the daemon stopped reporting ends at the last
+        # sample instead of running on to "now".
+        open_end = now_ts
+        if self.last_sample_ts is not None and now_ts - self.last_sample_ts > STALE_SAMPLE_SECONDS:
+            open_end = self.last_sample_ts
+        return [
+            (start, end if end is not None else max(start, open_end))
+            for start, end in self._outages
+            if (end is None or end >= since_ts) and start <= until_ts
+        ]
+
+    def get_gaps(self, since_ts, until_ts):
+        return [(start, end) for start, end in self._gaps if end >= since_ts and start <= until_ts]
 
     def get_meta_int(self, key, default):
-        conn = self._connect()
-        row = conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
-        return int(row[0]) if row else default
+        if key == "first_started_ts" and self._first_started_ts is not None:
+            return self._first_started_ts
+        return default
 
-
-class _PingPoller(threading.Thread):
-    """Background thread that probes EXTERNAL_HOSTS roughly once a second, forever,
-    persisting samples and derived outage episodes to the shared _PingStore."""
-
-    def __init__(self, store, gateway_override=None):
-        super().__init__(daemon=True, name="network-monitor-poller")
-        self.store = store
-        self.gateway_override = gateway_override
-        self._stop_event = threading.Event()
-        self._icmp_usable = None  # None = untested, True/False once known
-
-        self.gateway_ip = None
-        self._gateway_checked_at = 0.0
-
-        self.last_status = "unknown"
-        self.last_rtt_ms = None
-        self.last_sample_ts = None
-        self.last_host = None  # which external host most recently answered
-        self.last_outage_scope = None  # 'local' | 'isp' | 'unknown', set only while last_status == 'outage'
-
-    def stop(self):
-        self._stop_event.set()
-
-    def run(self):
-        try:
-            self.store.record_startup_gap()
-        except Exception:
-            logger.exception("Failed to check for a startup polling gap")
-
-        buffer = []
-        outage_start_ts = None
-        last_flush = time.monotonic()
-
-        while not self._stop_event.is_set():
-            loop_start = time.monotonic()
-            try:
-                # Everything for one tick lives in this try block as a last-resort
-                # safety net: any single unhandled exception here would otherwise
-                # silently kill the whole background thread, and nothing else
-                # watches for that (see NetworkMonitor._ensure_poller_started,
-                # which only restarts a poller it can see has actually died).
-                try:
-                    rtt_ms = self._ping_once()
-                except Exception:
-                    logger.exception("Unexpected error while pinging %s", EXTERNAL_HOSTS)
-                    rtt_ms = None
-                ts = int(time.time())
-
-                buffer.append((ts, rtt_ms))
-                self.last_sample_ts = ts
-                self.last_rtt_ms = rtt_ms
-                self.last_status = "online" if rtt_ms is not None else "outage"
-
-                if rtt_ms is None:
-                    if outage_start_ts is None:
-                        outage_start_ts = ts
-                        logger.warning(
-                            "Internet outage detected (all of %s unreachable; scope=%s).",
-                            EXTERNAL_HOSTS,
-                            self.last_outage_scope,
-                        )
-                elif outage_start_ts is not None:
-                    try:
-                        self.store.insert_outage(outage_start_ts, ts)
-                    except Exception:
-                        logger.exception("Failed to record outage episode")
-                    logger.warning(
-                        "Internet outage resolved after %ds (answered by %s).", ts - outage_start_ts, self.last_host
-                    )
-                    outage_start_ts = None
-
-                now_mono = time.monotonic()
-                if buffer and (len(buffer) >= FLUSH_BATCH_SIZE or now_mono - last_flush >= FLUSH_INTERVAL_SECONDS):
-                    try:
-                        self.store.flush_pings(buffer)
-                        self.store.prune(int(time.time()))
-                    except Exception:
-                        logger.exception("Failed to flush/prune ping data")
-                    buffer = []
-                    last_flush = now_mono
-            except Exception:
-                logger.exception("Unexpected error in internet outage monitor poll loop; continuing")
-
-            elapsed = time.monotonic() - loop_start
-            self._stop_event.wait(max(0.0, PING_INTERVAL_SECONDS - elapsed))
-
-        # best-effort flush on shutdown so the last few seconds aren't lost
-        try:
-            self.store.flush_pings(buffer)
-            if outage_start_ts is not None:
-                self.store.insert_outage(outage_start_ts, int(time.time()))
-        except Exception:
-            logger.exception("Failed to flush ping data on shutdown")
-
-    def _ping_once(self):
-        # Failover hierarchy: try each external host in order, first answer wins.
-        # This is the "Step 2 / Step 3" logic - only fall through to the next host
-        # if the previous one actually failed to answer.
-        for host in EXTERNAL_HOSTS:
-            rtt = self._probe_host(host, PING_TIMEOUT_SECONDS)
-            if rtt is not None:
-                self.last_host = host
-                self.last_outage_scope = None
-                return rtt
-
-        # Every external host failed - this is "Step 4": before declaring an
-        # outage, check whether the local gateway is even reachable, to tell a
-        # local network/Wi-Fi/cable problem apart from an ISP/backbone outage.
-        self._ensure_gateway_detected()
-        if self.gateway_ip:
-            self.last_outage_scope = "isp" if self._probe_gateway_reachable(self.gateway_ip) else "local"
-        else:
-            self.last_outage_scope = "unknown"
-        self.last_host = None
-        return None
-
-    def _ensure_gateway_detected(self):
-        if self.gateway_override:
-            self.gateway_ip = self.gateway_override
-            return
-        now = time.monotonic()
-        if self.gateway_ip is not None and now - self._gateway_checked_at < GATEWAY_REDETECT_INTERVAL_SECONDS:
-            return
-        self.gateway_ip = _detect_default_gateway()
-        self._gateway_checked_at = now
-        if self.gateway_ip:
-            logger.debug("Using %s as the local gateway for outage-scope diagnostics.", self.gateway_ip)
-
-    def _probe_gateway_reachable(self, host):
-        """Boolean-only reachability check for the local gateway (routers rarely
-        run a DNS resolver, so this isn't reused for latency/EXTERNAL_HOSTS probing).
-        A TCP connection being actively refused still counts as reachable - it means
-        something at that address answered our packet, just not on that port."""
-        rtt = self._probe_host(host, GATEWAY_PROBE_TIMEOUT_SECONDS)
-        if rtt is not None:
-            return True
-        try:
-            with socket.create_connection((host, GATEWAY_TCP_PROBE_PORT), timeout=GATEWAY_PROBE_TIMEOUT_SECONDS):
-                return True
-        except ConnectionRefusedError:
-            return True
-        except OSError:
-            return False
-
-    def _probe_host(self, host, timeout):
-        # Real ICMP echo needs raw sockets (root/CAP_NET_RAW), which the InkyPi
-        # service has on the Pi (runs as root); anywhere that's not available
-        # (dev machines, containers) it falls back to timing a TCP connect to
-        # the same host, which is still a meaningful up/down + latency probe.
-        if sys.platform.startswith("linux") and self._icmp_usable is not False:
-            rtt = self._icmp_ping(host, timeout)
-            if rtt is not NotImplemented:
-                self._icmp_usable = True
-                return rtt
-            self._icmp_usable = False
-            logger.info("Raw ICMP ping unavailable (needs root/CAP_NET_RAW); falling back to TCP connect timing.")
-        return self._tcp_ping(host, timeout)
-
-    def _icmp_ping(self, host, timeout):
-        """Returns RTT in ms, None on timeout/no-reply, or NotImplemented if raw
-        ICMP sockets can't be used here (caller falls back to TCP)."""
-        try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_ICMP)
-        except (PermissionError, OSError):
-            return NotImplemented
-
-        try:
-            sock.settimeout(timeout)
-            packet_id = os.getpid() & 0xFFFF
-            payload = struct.pack("d", time.time())
-            header = struct.pack("!BBHHH", 8, 0, 0, packet_id, 1)
-            checksum = self._icmp_checksum(header + payload)
-            header = struct.pack("!BBHHH", 8, 0, checksum, packet_id, 1)
-            packet = header + payload
-
-            send_time = time.time()
-            try:
-                sock.sendto(packet, (host, 0))
-            except OSError:
-                return None
-
-            deadline = send_time + timeout
-            while True:
-                remaining = deadline - time.time()
-                if remaining <= 0:
-                    return None
-                sock.settimeout(remaining)
-                try:
-                    reply, addr = sock.recvfrom(1024)
-                except (socket.timeout, OSError):
-                    return None
-                recv_time = time.time()
-                if addr[0] != host or len(reply) < 20:
-                    continue
-                ip_header_len = (reply[0] & 0x0F) * 4
-                icmp_reply = reply[ip_header_len:ip_header_len + 8]
-                if len(icmp_reply) < 8:
-                    continue
-                reply_type, _reply_code, _checksum, reply_id, _reply_seq = struct.unpack("!BBHHH", icmp_reply)
-                if reply_type == 0 and reply_id == packet_id:
-                    return (recv_time - send_time) * 1000.0
-        finally:
-            sock.close()
-
-    @staticmethod
-    def _icmp_checksum(data):
-        if len(data) % 2:
-            data += b"\x00"
-        total = sum(struct.unpack("!%dH" % (len(data) // 2), data))
-        total = (total >> 16) + (total & 0xFFFF)
-        total += total >> 16
-        return ~total & 0xFFFF
-
-    def _tcp_ping(self, host, timeout):
-        start = time.time()
-        try:
-            with socket.create_connection((host, TCP_FALLBACK_PORT), timeout=timeout):
-                return (time.time() - start) * 1000.0
-        except OSError:
-            return None
+    def get_speedtests(self, since_ts):
+        """[(ts, download_mbps, upload_mbps, idle_latency_ms or None, server or None)], oldest first."""
+        tests = []
+        for row in self._pivoted("speedtest", _to_rfc3339(since_ts)):
+            ts = _parse_influx_time(row.get("_time"))
+            down, up = _parse_float(row.get("download_mbps")), _parse_float(row.get("upload_mbps"))
+            if ts is None or down is None or up is None:
+                continue
+            tests.append((ts, down, up, _parse_float(row.get("idle_latency_ms")), row.get("server") or None))
+        tests.sort()
+        return tests
 
 
 class NetworkMonitor(BasePlugin):
-    def __init__(self, config, **dependencies):
-        super().__init__(config, **dependencies)
-        self._store = None
-        self._poller = None
-        self._start_lock = threading.Lock()
-
     def generate_settings_template(self):
         template_params = super().generate_settings_template()
+        template_params['api_key'] = {
+            "required": True,
+            "service": "InfluxDB (Network Monitor)",
+            "expected_key": "INFLUXDB_NETMON_TOKEN"
+        }
         return template_params
 
-    def on_startup(self, instance_settings, device_config):
-        # Only eagerly start at app boot if the user opted in for this instance;
-        # otherwise monitoring still starts lazily on first view/refresh (see
-        # generate_image), so plugins nobody ever added stay fully idle.
-        if self._is_persistent(instance_settings):
-            self._ensure_poller_started(self._parse_gateway_override(instance_settings))
-
-    @staticmethod
-    def _is_persistent(settings):
-        return str(settings.get("persistentMonitoring", "")).lower() == "true"
-
-    @staticmethod
-    def _parse_gateway_override(settings):
-        value = (settings.get("gatewayIp") or "").strip()
-        return value or None
-
     def generate_image(self, settings, device_config):
-        self._ensure_poller_started(self._parse_gateway_override(settings))
+        influx_url = (settings.get("influxUrl") or "").strip() or DEFAULT_INFLUX_URL
+        influx_org = (settings.get("influxOrg") or "").strip() or DEFAULT_INFLUX_ORG
+        raw_bucket = (settings.get("rawBucket") or "").strip() or DEFAULT_RAW_BUCKET
+        bucket = (settings.get("influxBucket") or "").strip() or DEFAULT_BUCKET
+        verify_ssl = str(settings.get("skipTlsVerify", "")).lower() != "true"
+
+        token = device_config.load_env_key("INFLUXDB_NETMON_TOKEN")
+        if not token:
+            raise RuntimeError("InfluxDB token not configured (set INFLUXDB_NETMON_TOKEN in .env).")
 
         title = (settings.get("title") or "").strip() or DEFAULT_TITLE
 
@@ -484,40 +271,47 @@ class NetworkMonitor(BasePlugin):
         now_dt = datetime.now(tz)
         now_ts = int(now_dt.timestamp())
 
-        width, height = dimensions
-        fonts = {
-            "title": get_font("Jost", round(height * 0.040), "bold"),
-            "label": get_font("Jost", round(height * 0.020), "bold"),
-            "small": get_font("Jost", round(height * 0.014), "normal"),
-        }
+        store = _InfluxStore(influx_url, influx_org, token, raw_bucket, bucket, verify_ssl)
+        try:
+            store.load()
+            self._store = store
+            width, height = dimensions
+            fonts = {
+                "title": get_font("Jost", round(height * 0.040), "bold"),
+                "label": get_font("Jost", round(height * 0.020), "bold"),
+                "small": get_font("Jost", round(height * 0.014), "normal"),
+            }
 
-        if not self._store.has_any_data():
-            return self._render_waiting_image(dimensions, title, fonts)
+            if not store.has_any_data():
+                return self._render_waiting_image(dimensions, title, fonts)
 
-        image = Image.new("RGB", dimensions, COLOR_WHITE)
-        draw = ImageDraw.Draw(image)
+            image = Image.new("RGB", dimensions, COLOR_WHITE)
+            draw = ImageDraw.Draw(image)
 
-        title_height = round(height * 0.075)
-        self._draw_title(draw, width, title_height, title, now_dt, fonts)
+            title_height = round(height * 0.075)
+            self._draw_title(draw, width, title_height, title, now_dt, fonts, store, time_format)
 
-        body_top = title_height
-        margin = round(width * 0.012)
-        left_width = round(width * 2 / 3)
+            body_top = title_height
+            margin = round(width * 0.012)
+            left_width = round(width * 2 / 3)
 
-        left_box = (margin, body_top + margin, left_width - margin // 2, height - margin)
-        right_top = body_top + margin
-        right_bottom = height - margin
-        right_height = right_bottom - right_top
-        histogram_box = (left_width + margin // 2, right_top, width - margin, right_top + round(right_height * 0.42))
-        calendar_box = (left_width + margin // 2, right_top + round(right_height * 0.42) + margin, width - margin, right_bottom)
+            left_box = (margin, body_top + margin, left_width - margin // 2, height - margin)
+            right_top = body_top + margin
+            right_bottom = height - margin
+            right_height = right_bottom - right_top
+            histogram_box = (left_width + margin // 2, right_top, width - margin, right_top + round(right_height * 0.42))
+            calendar_box = (left_width + margin // 2, right_top + round(right_height * 0.42) + margin, width - margin, right_bottom)
 
-        min_outage_seconds = self._parse_min_outage_seconds(settings)
-        history_weeks = self._parse_history_weeks(settings)
-        week_start = self._parse_week_start(settings)
-        aggregation = self._parse_aggregation(settings)
-        self._draw_sparklines(draw, left_box, now_ts, tz, fonts, min_outage_seconds, time_format)
-        self._draw_histogram(draw, histogram_box, now_ts, tz, fonts, min_outage_seconds, history_weeks, week_start, aggregation)
-        self._draw_calendar(draw, calendar_box, now_ts, tz, fonts, min_outage_seconds)
+            min_outage_seconds = self._parse_min_outage_seconds(settings)
+            history_weeks = self._parse_history_weeks(settings)
+            week_start = self._parse_week_start(settings)
+            aggregation = self._parse_aggregation(settings)
+            self._draw_left_column(draw, left_box, now_ts, tz, fonts, min_outage_seconds, time_format)
+            self._draw_histogram(draw, histogram_box, now_ts, tz, fonts, min_outage_seconds, history_weeks, week_start, aggregation)
+            self._draw_calendar(draw, calendar_box, now_ts, tz, fonts, min_outage_seconds)
+        except InfluxQueryError as e:
+            logger.error(f"Failed to query InfluxDB: {e}")
+            raise RuntimeError("Failed to retrieve network monitor data from InfluxDB, please check logs.")
 
         return image
 
@@ -552,29 +346,6 @@ class NetworkMonitor(BasePlugin):
             return outages
         return [(start, end) for start, end in outages if (end - start) >= min_seconds]
 
-    def _ensure_poller_started(self, gateway_override=None):
-        # Checks is_alive(), not just "is None": a poller that has died (crash,
-        # thread killed, whatever) would otherwise leave self._poller set forever,
-        # and every future render/on_startup call would wrongly treat monitoring
-        # as already running and never bring it back.
-        if self._poller is not None and self._poller.is_alive():
-            return
-        with self._start_lock:
-            if self._poller is not None and self._poller.is_alive():
-                return
-            if self._poller is not None:
-                logger.warning("Internet outage monitor poller had stopped unexpectedly; restarting it.")
-            if self._store is None:
-                db_path = os.path.join(self.get_plugin_dir("data"), "pings.db")
-                self._store = _PingStore(db_path)
-            self._poller = _PingPoller(self._store, gateway_override=gateway_override)
-            self._poller.start()
-            logger.info(
-                "Started internet outage monitor background poller (probing %s roughly every %.0fs).",
-                EXTERNAL_HOSTS,
-                PING_INTERVAL_SECONDS,
-            )
-
     # ---- rendering -------------------------------------------------------
 
     def _render_waiting_image(self, dimensions, title, fonts):
@@ -592,18 +363,18 @@ class NetworkMonitor(BasePlugin):
         return image
 
     def _current_status(self):
-        poller = self._poller
-        if poller is None or poller.last_status == "unknown":
-            return "Unknown", COLOR_YELLOW
-        if poller.last_status == "online":
+        store = self._store
+        if store.last_sample_ts is None or time.time() - store.last_sample_ts > STALE_SAMPLE_SECONDS:
+            return "Monitor Offline", COLOR_YELLOW
+        if store.last_up:
             return "Online", COLOR_GREEN
-        if poller.last_outage_scope == "local":
+        if store.outage_scope == "local":
             return "Outage (Local)", COLOR_RED
-        if poller.last_outage_scope == "isp":
+        if store.outage_scope == "isp":
             return "Outage (ISP)", COLOR_RED
         return "Outage", COLOR_RED
 
-    def _draw_title(self, draw, width, title_height, title, now_dt, fonts):
+    def _draw_title(self, draw, width, title_height, title, now_dt, fonts, store, time_format):
         pad = round(width * 0.0125)
         draw.line([(0, title_height), (width, title_height)], fill=COLOR_BLACK, width=3)
         draw.text((pad, title_height / 2), title, font=fonts["title"], fill=COLOR_BLACK, anchor="lm")
@@ -628,27 +399,113 @@ class NetworkMonitor(BasePlugin):
             anchor="mm",
         )
 
-        if self._poller is not None and self._poller.last_sample_ts:
-            updated_dt = datetime.fromtimestamp(self._poller.last_sample_ts, now_dt.tzinfo)
+        if store.last_sample_ts:
+            updated_dt = datetime.fromtimestamp(store.last_sample_ts, now_dt.tzinfo)
             updated_str = f"Updated {updated_dt.strftime('%I:%M:%S %p').lstrip('0')}"
             draw.text((badge_left - pad, title_height / 2), updated_str, font=fonts["small"], fill=COLOR_BLACK, anchor="rm")
 
-    def _draw_sparklines(self, draw, box, now_ts, tz, fonts, min_outage_seconds, time_format):
+    def _draw_left_column(self, draw, box, now_ts, tz, fonts, min_outage_seconds, time_format):
+        """Ping sparklines for the last hour (top) and 12 hours (bottom), with the
+        speed-test history between them."""
         x0, y0, x1, y1 = box
         gap = round((y1 - y0) * 0.03)
         panel_h = (y1 - y0 - 2 * gap) / 3
-        windows = [
-            ("Last Hour", 3600),
-            ("Last 6 Hours", 6 * 3600),
-            ("Last 12 Hours", 12 * 3600),
-        ]
-        for i, (label, span) in enumerate(windows):
+        panels = [("Last Hour", 3600), ("speed", None), ("Last 12 Hours", 12 * 3600)]
+        for i, (label, span) in enumerate(panels):
             top = y0 + i * (panel_h + gap)
-            bottom = top + panel_h
+            panel_box = (x0, top, x1, top + panel_h)
+            if span is None:
+                self._draw_speed_panel(draw, panel_box, now_ts, tz, fonts)
+                continue
             since_ts = now_ts - span
             samples = self._store.get_samples(since_ts, now_ts)
             outages = self._filter_outages(self._store.get_outages(since_ts, now_ts, now_ts), min_outage_seconds)
-            self._draw_sparkline_panel(draw, (x0, top, x1, bottom), label, since_ts, now_ts, samples, outages, fonts, tz, time_format)
+            self._draw_sparkline_panel(draw, panel_box, label, since_ts, now_ts, samples, outages, fonts, tz, time_format)
+
+    def _draw_speed_panel(self, draw, box, now_ts, tz, fonts):
+        """Download/upload throughput from the daemon's scheduled speed tests over
+        the last SPEEDTEST_WINDOW_HOURS, plus the most recent reading."""
+        x0, y0, x1, y1 = box
+        pad = 8
+        draw.rectangle([x0, y0, x1, y1], outline=COLOR_BLACK, width=2)
+
+        since_ts = now_ts - SPEEDTEST_WINDOW_HOURS * 3600
+        tests = self._store.get_speedtests(since_ts)
+
+        draw.text((x0 + pad, y0 + pad), f"Speed Test (Last {SPEEDTEST_WINDOW_HOURS} Hours)", font=fonts["label"], fill=COLOR_BLACK, anchor="la")
+
+        # Legend row doubles as the latest reading so the current numbers are visible
+        # without reading them off the chart.
+        legend_font = fonts["small"]
+        swatch = legend_font.size
+        legend_y = y0 + pad * 2 + fonts["label"].size
+        latest = tests[-1] if tests else None
+        entries = [
+            ("Download", COLOR_BLUE, f"{latest[1]:.0f} Mbps" if latest else None),
+            ("Upload", COLOR_GREEN, f"{latest[2]:.0f} Mbps" if latest else None),
+        ]
+        lx = x0 + pad
+        for name, color, value in entries:
+            text = f"{name} {value}" if value else name
+            draw.rectangle([lx, legend_y, lx + swatch, legend_y + swatch], fill=color, outline=COLOR_BLACK)
+            draw.text((lx + swatch + 4, legend_y), text, font=legend_font, fill=COLOR_BLACK, anchor="la")
+            lx += swatch + 6 + draw.textlength(text, font=legend_font) + 14
+        if latest and latest[3] is not None:
+            draw.text((lx, legend_y), f"Ping {latest[3]:.0f} ms", font=legend_font, fill=COLOR_BLACK, anchor="la")
+
+        chart_top = legend_y + swatch + pad
+        chart_bottom = y1 - pad * 2 - fonts["small"].size - 6
+        chart_left = x0 + pad + 48
+        chart_right = x1 - pad
+
+        if not tests:
+            draw.text(((chart_left + chart_right) / 2, (chart_top + chart_bottom) / 2), "No speed tests yet",
+                      font=fonts["label"], fill=COLOR_BLUE, anchor="mm")
+            return
+
+        span = SPEEDTEST_WINDOW_HOURS * 3600
+        y_max = max(max(t[1], t[2]) for t in tests) or 1.0
+
+        def x_of(ts):
+            return chart_left + (min(max(ts, since_ts), now_ts) - since_ts) / span * (chart_right - chart_left)
+
+        def y_of(value):
+            return chart_bottom - (value / y_max) * (chart_bottom - chart_top)
+
+        for frac in (0.25, 0.5, 0.75):
+            gy = chart_bottom - frac * (chart_bottom - chart_top)
+            draw.line([(chart_left, gy), (chart_right, gy)], fill=COLOR_BLACK, width=1)
+        draw.line([(chart_left, chart_bottom), (chart_right, chart_bottom)], fill=COLOR_BLACK, width=1)
+
+        # Tests are hours apart, so a long silence (daemon down, tests failing)
+        # breaks the line instead of drawing a misleading straight run across it.
+        gap_limit = max(3 * 3600, 2.5 * self._median_spacing(tests))
+        for column, color, width in ((2, COLOR_GREEN, 3), (1, COLOR_BLUE, 4)):
+            prev = None
+            for test in tests:
+                point = (x_of(test[0]), y_of(test[column]))
+                if prev is not None and test[0] - prev[0] <= gap_limit:
+                    draw.line([prev[1], point], fill=color, width=width)
+                draw.ellipse([point[0] - 3, point[1] - 3, point[0] + 3, point[1] + 3], fill=color)
+                prev = (test[0], point)
+
+        draw.text((x0 + pad, chart_top), f"{int(y_max)}", font=fonts["small"], fill=COLOR_BLACK, anchor="lm")
+        draw.text((x0 + pad, chart_bottom), "0", font=fonts["small"], fill=COLOR_BLACK, anchor="lm")
+        draw.text((x0 + pad, (chart_top + chart_bottom) / 2), "Mbps", font=fonts["small"], fill=COLOR_BLACK, anchor="lm")
+
+        tick_y = chart_bottom + 4
+        for frac, h_anchor in ((0.0, "l"), (0.25, "m"), (0.5, "m"), (0.75, "m"), (1.0, "r")):
+            tick_ts = since_ts + frac * span
+            tick_x = x_of(tick_ts)
+            draw.line([(tick_x, chart_bottom), (tick_x, chart_bottom + 3)], fill=COLOR_BLACK, width=1)
+            tick_dt = datetime.fromtimestamp(tick_ts, tz)
+            label = f"{tick_dt.strftime('%a')} {tick_dt.strftime('%I %p').lstrip('0')}"
+            draw.text((tick_x, tick_y), label, font=fonts["small"], fill=COLOR_BLACK, anchor=h_anchor + "a")
+
+    @staticmethod
+    def _median_spacing(tests):
+        spacings = sorted(b[0] - a[0] for a, b in zip(tests, tests[1:]))
+        return spacings[len(spacings) // 2] if spacings else 0
 
     def _format_clock_time(self, dt, time_format):
         if time_format == "24h":

@@ -11,3 +11,4 @@
 *.sh text eol=lf
 .envrc text eol=lf
 install/** text eol=lf
+scripts/pidisplay_netmon/** text eol=lf

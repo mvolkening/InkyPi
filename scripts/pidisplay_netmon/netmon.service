@@ -1,0 +1,24 @@
+[Unit]
+Description=Internet ping + speed test monitor (writes to InfluxDB)
+After=network-online.target influxdb.service
+Wants=network-online.target
+
+[Service]
+User=netmon
+Group=netmon
+ExecStart=/usr/bin/python3 /opt/netmon/netmon.py
+Restart=always
+RestartSec=10
+StateDirectory=netmon
+# Raw ICMP sockets for real pings, without running as root.
+AmbientCapabilities=CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_RAW
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

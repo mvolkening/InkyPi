@@ -5,33 +5,38 @@
 
 <div class="form-group">
     <span>
-        This plugin polls a small failover chain of well-known public resolvers roughly once a second in the
-        background to detect internet outages, independent of how often this display refreshes: Cloudflare
-        (1.1.1.1) first, then Google (8.8.8.8) and Quad9 (9.9.9.9) as fallbacks, so one provider dropping ICMP
-        doesn't read as a real outage - only when all three fail is it counted as one. When that happens, it
-        also checks your local router/gateway once to tell a local Wi-Fi/cable problem apart from a real ISP
-        outage, shown as "Outage (Local)" vs "Outage (ISP)" in the badge above.
-        By default, monitoring starts as soon as this plugin is saved/previewed for the first time and keeps
-        running for as long as InkyPi is running, building up history for the sparklines, hourly outage
-        histogram, and 4-week calendar shown on screen. A short "no data" period will show right after the
-        very first save while the first samples are collected. Turning on Persistent Monitoring below starts
-        it automatically on every InkyPi boot/reboot instead, so outages during/right after a reboot also
-        show up in the history.
+        Shows internet outages and speed tests recorded by the <code>netmon</code> daemon running on a
+        hard-wired Pi (see <code>scripts/pidisplay_netmon/</code>). That daemon pings a failover chain of public
+        resolvers (Cloudflare, Google, Quad9) once a second, only counting an outage when all of them fail, and
+        checks the local gateway to tell a "Local" outage from an "ISP" one. It also runs a speed test on an
+        adjustable schedule (<code>interval_minutes</code> in <code>/etc/netmon/netmon.conf</code> on that Pi).
+        Everything is stored in that Pi's InfluxDB, so history survives InkyPi restarts and this display just draws
+        it. Store an InfluxDB token with read access to both buckets in the .env file as
+        <code>INFLUXDB_NETMON_TOKEN</code> (see the "Requires API Key" note above).
     </span>
 </div>
 
 <div class="form-group nowrap">
-    <label for="persistentMonitoring" class="form-label">Persistent Monitoring:</label>
-    <div class="toggle-container">
-        <input type="checkbox" id="persistentMonitoring" name="persistentMonitoring" class="toggle-checkbox" value="false" onclick="this.value=this.checked ? 'true' : 'false';">
-        <label for="persistentMonitoring" class="toggle-label"></label>
-    </div>
+    <label for="influxUrl" class="form-label">InfluxDB URL</label>
+    <input type="text" id="influxUrl" name="influxUrl" class="form-input" value="http://PiDisplay.home.local:8086" required>
 </div>
 
 <div class="form-group nowrap">
-    <label for="gatewayIp" class="form-label">Router/Gateway IP</label>
-    <input type="text" id="gatewayIp" name="gatewayIp" class="form-input" placeholder="auto-detect">
-    <span title="Only used for the Local vs ISP outage check above, when every external resolver has failed. Leave blank to auto-detect (e.g. 192.168.1.1 or 192.168.0.1); set this if auto-detection picks the wrong interface or fails on your setup.">&#9432;</span>
+    <label for="influxOrg" class="form-label">Organization</label>
+    <input type="text" id="influxOrg" name="influxOrg" class="form-input" value="none" required>
+    <span title="InfluxDB organization name, or its 16-character Organization ID.">&#9432;</span>
+</div>
+
+<div class="form-group nowrap">
+    <label for="rawBucket" class="form-label">Ping Bucket</label>
+    <input type="text" id="rawBucket" name="rawBucket" class="form-input" value="netmon_raw">
+    <span title="Short-retention bucket holding the 1 Hz ping samples (drives the sparklines and live status).">&#9432;</span>
+</div>
+
+<div class="form-group nowrap">
+    <label for="influxBucket" class="form-label">Episodes Bucket</label>
+    <input type="text" id="influxBucket" name="influxBucket" class="form-input" value="netmon">
+    <span title="Long-retention bucket holding outages, polling gaps and speed tests (drives the histogram, calendar and speed graph).">&#9432;</span>
 </div>
 
 <div class="form-group nowrap">
@@ -81,11 +86,10 @@
         if (loadPluginSettings) {
             document.getElementById('title').value = pluginSettings.title || '';
 
-            const persistentMonitoring = pluginSettings.persistentMonitoring === 'true' || pluginSettings.persistentMonitoring === true;
-            document.getElementById('persistentMonitoring').checked = persistentMonitoring;
-            document.getElementById('persistentMonitoring').value = persistentMonitoring ? 'true' : 'false';
-
-            document.getElementById('gatewayIp').value = pluginSettings.gatewayIp || '';
+            document.getElementById('influxUrl').value = pluginSettings.influxUrl || 'http://PiDisplay.home.local:8086';
+            document.getElementById('influxOrg').value = pluginSettings.influxOrg || 'none';
+            document.getElementById('rawBucket').value = pluginSettings.rawBucket || 'netmon_raw';
+            document.getElementById('influxBucket').value = pluginSettings.influxBucket || 'netmon';
             document.getElementById('minOutageSeconds').value = pluginSettings.minOutageSeconds || 2;
             document.getElementById('weekStart').value = pluginSettings.weekStart || 'sunday';
             historyWeeksInput.value = pluginSettings.historyWeeks || 4;

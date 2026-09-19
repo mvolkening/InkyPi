@@ -94,3 +94,25 @@ Required for the Image Album plugin for the Immich Provider
     ```
     IMMICH_KEY=your-key
     ```
+
+## InfluxDB Token
+
+Required for the Home Power Monitor plugin
+
+- Login to your InfluxDB v2 instance
+- Under Load Data > API Tokens, generate a token with at least read access to the bucket the plugin will query
+- Store your api token in the .env file with the key `INFLUXDB_TOKEN`
+    ```
+    INFLUXDB_TOKEN=your-token
+    ```
+
+## InfluxDB Token (Network Monitor)
+
+Required for the Internet Outage Monitor Plugin
+
+- The ping/speed-test daemon in `scripts/pidisplay_netmon/` stores its data in InfluxDB (see its README)
+- Use a token with read access to the `netmon_raw` and `netmon` buckets (the daemon's installer creates one)
+- Store it in the .env file with the key `INFLUXDB_NETMON_TOKEN`
+    ```
+    INFLUXDB_NETMON_TOKEN=your-token
+    ```

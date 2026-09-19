@@ -1,0 +1,36 @@
+# /etc/netmon/netmon.conf
+#
+# Edited while the service is running? The daemon notices and reloads this file
+# within a few seconds - no restart needed (except for the [influx] section's
+# effect on already-open requests, which simply apply to the next write).
+
+[influx]
+url = http://localhost:8086
+org = none
+# Token with read+write on both buckets below (install.sh can create one).
+token = REPLACE_ME
+# 1 Hz ping samples; short retention keeps the SD card small.
+raw_bucket = netmon_raw
+# Outage/gap episodes and speed tests; tiny, so long retention.
+bucket = netmon
+
+[ping]
+interval_seconds = 1
+timeout_seconds = 1
+# Failover chain: the first host that answers wins. Only when every one fails
+# is it counted as an outage.
+hosts = 1.1.1.1, 8.8.8.8, 9.9.9.9
+# Local router, used only to tell "Local" outages from "ISP" ones.
+# Blank = auto-detect from the default route.
+gateway =
+
+[speedtest]
+enabled = true
+# How often to run a speed test. Each one moves ~300 MB at gigabit speeds, so
+# hourly is ~7 GB/day - raise this if your ISP has a data cap.
+interval_minutes = 60
+timeout_seconds = 180
+command = speedtest-cli --json --secure
+# Wait this long before trying again after a failed test (or one skipped
+# because the internet was down).
+retry_minutes = 10
