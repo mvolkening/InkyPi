@@ -15,10 +15,14 @@ logger = logging.getLogger(__name__)
 
 STATIONS_URL = "https://api.weather.gc.ca/collections/hydrometric-stations/items"
 REALTIME_URL = "https://api.weather.gc.ca/collections/hydrometric-realtime/items"
-# CARTO's "Positron" style, unlike stock OSM carto tiles, doesn't fill in
-# woodlots/landuse polygons - just streets, water outlines, and place labels,
-# which reads much more cleanly on a low-color-count e-ink panel.
-OSM_TILE_URL = "https://a.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png"
+# CARTO's free unauthenticated "Positron" basemap CDN (previously used here)
+# started requiring an API key, so this uses OSM's own standard tile server
+# instead. Its default style fills in woodlots/landuse polygons that the
+# lighter CARTO style didn't, so it reads busier on a low-color-count e-ink
+# panel - the gamma/MinFilter post-processing in build_basemap() darkens and
+# thickens thin linework regardless of style, but heavier fill areas may need
+# re-tuning if they wash out or overwhelm the drawn river lines on hardware.
+OSM_TILE_URL = "https://tile.openstreetmap.org/{z}/{x}/{y}.png"
 # The main public Overpass instance returns 504 "server too busy" fairly
 # often under normal load, so a couple of alternates are tried in turn: the
 # operator's own load-balanced front-end, then an independent mirror.

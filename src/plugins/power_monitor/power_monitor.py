@@ -400,6 +400,40 @@ def _scale_to_wh(points, unit):
     return [(ts, value * scale) for ts, value in points]
 
 
+# Generous residential ceiling used only to catch physically-impossible
+# readings, not to flag genuinely high (but real) usage - a large home
+# running EV charging, electric heat, and a pool pump simultaneously still
+# falls well under this.
+MAX_PLAUSIBLE_AVERAGE_KW = 40.0
+
+
+def _reject_implausible_energy(points, bucket_hours, max_avg_kw=MAX_PLAUSIBLE_AVERAGE_KW):
+    """Drops any (timestamp, Wh) bucket whose implied average power exceeds a
+    generous residential ceiling. `fetch_total_energy_series`'s
+    `difference(nonNegative: true)` only guards against downward counter
+    glitches (see its docstring): a single upward glitch - a bad counter
+    reading that jumps too high, even if it "corrects" back down again right
+    after - is kept permanently, since that correction is a negative diff
+    which gets clipped to 0 instead of canceling the spike out. Left
+    unfiltered, one such sample can inflate an entire 30-day chart's scale
+    until every legitimate day's bar is squeezed down to invisible."""
+    max_wh = max_avg_kw * 1000.0 * bucket_hours
+    kept = []
+    for ts, wh in points:
+        if wh > max_wh:
+            logger.warning(
+                f"Discarding implausible energy reading of {wh / 1000:.0f} kWh "
+                f"(implies a {wh / 1000 / bucket_hours:.0f} kW average) at {_to_rfc3339(ts)}; "
+                "likely a Total Energy counter glitch."
+            )
+            continue
+        kept.append((ts, wh))
+    return kept
+
+
+MIN_UNIT_SCALE_SAMPLE_DAYS = 10  # see _counter_unit_scale
+
+
 def _counter_unit_scale(counter_daily_wh, reference_daily_wh, tz):
     """Cross-checks daily energy derived from the meter's cumulative counter
     against the power-sample integral over the same days (the integral is
@@ -408,14 +442,31 @@ def _counter_unit_scale(counter_daily_wh, reference_daily_wh, tz):
     the meter's counter (kWh vs Wh) and every energy/cost figure would
     silently be 1000x off - so the matching correction factor is returned for
     the caller to apply. Anything else returns 1.0, trusting the counter as
-    configured."""
+    configured.
+
+    Requires a minimum number of overlapping days before acting on the ratio:
+    with too few days (e.g. because that refresh's reference query only
+    completed partially, or a couple of days have real ingestion gaps), the
+    ratio is noise rather than signal, and one bad refresh could otherwise
+    permanently misdetect a bogus 1000x mismatch and inflate every day's
+    energy/cost in the 30-day charts - trusting the counter as configured is
+    the safer default when there isn't enough overlap to be confident."""
     reference_by_date = {datetime.fromtimestamp(ts, tz).date(): wh for ts, wh in reference_daily_wh}
     counter_sum = reference_sum = 0.0
+    matched_days = 0
     for ts, wh in counter_daily_wh:
         reference_wh = reference_by_date.get(datetime.fromtimestamp(ts, tz).date())
         if reference_wh is not None:
             counter_sum += wh
             reference_sum += reference_wh
+            matched_days += 1
+    if matched_days < MIN_UNIT_SCALE_SAMPLE_DAYS:
+        logger.warning(
+            f"Only {matched_days} day(s) overlapped between the Total Energy counter and the power-sample "
+            f"reference query (need at least {MIN_UNIT_SCALE_SAMPLE_DAYS}); skipping unit auto-detection for "
+            "this refresh and trusting the counter as configured."
+        )
+        return 1.0
     if counter_sum <= 0 or reference_sum <= 0:
         return 1.0
     ratio = reference_sum / counter_sum
@@ -552,7 +603,7 @@ class PowerMonitor(BasePlugin):
             energy_scale = None
             if use_total_energy:
                 total_energy_daily_raw = client.fetch_total_energy_series(month_start_ts, "1d")
-                counter_daily = _scale_to_wh(total_energy_daily_raw, total_energy_unit)
+                counter_daily = _reject_implausible_energy(_scale_to_wh(total_energy_daily_raw, total_energy_unit), bucket_hours=24)
                 if counter_daily:
                     reference_daily = client.fetch_daily_energy_wh(month_start_ts)
                     energy_scale = _counter_unit_scale(counter_daily, reference_daily, tz)
@@ -568,7 +619,8 @@ class PowerMonitor(BasePlugin):
                 hourly_energy = []
                 if energy_scale is not None:
                     total_energy_hourly_raw = client.fetch_total_energy_series(month_start_ts, "1h")
-                    hourly_energy = [(ts, wh * energy_scale) for ts, wh in _scale_to_wh(total_energy_hourly_raw, total_energy_unit)]
+                    hourly_energy_wh = _reject_implausible_energy(_scale_to_wh(total_energy_hourly_raw, total_energy_unit), bucket_hours=1)
+                    hourly_energy = [(ts, wh * energy_scale) for ts, wh in hourly_energy_wh]
                 if not hourly_energy:
                     hourly_energy = client.fetch_hourly_means(month_start_ts)
                 day_period_wh = _sum_period_wh(hourly_energy, tz, holiday_dates)
