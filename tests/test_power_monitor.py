@@ -2,7 +2,7 @@ from datetime import datetime, timedelta
 
 import pytz
 
-from plugins.power_monitor.power_monitor import _counter_unit_scale
+from plugins.power_monitor.power_monitor import MIN_UNIT_SCALE_SAMPLE_DAYS, _counter_unit_scale
 
 TZ = pytz.timezone("America/New_York")
 START = datetime(2026, 7, 1)
@@ -16,6 +16,11 @@ def _daily_series(day_wh):
     ]
 
 
+# Auto-detection needs a minimum number of overlapping days before it trusts the
+# ratio, so mismatch cases must supply at least that many.
+ENOUGH_DAYS = MIN_UNIT_SCALE_SAMPLE_DAYS
+
+
 class TestCounterUnitScale:
     def test_matching_counter_returns_1(self):
         counter = _daily_series([40000.0, 42000.0, 38000.0])
@@ -25,14 +30,21 @@ class TestCounterUnitScale:
     def test_kwh_counter_read_as_wh_scales_up_1000x(self):
         # Meter reports kWh (e.g. 40.0 per day) but the plugin is set to Wh,
         # so the counter-derived values come out ~1000x below the watt integral.
-        counter = _daily_series([40.0, 42.0, 38.0])
-        reference = _daily_series([41000.0, 42000.0, 39000.0])
+        counter = _daily_series([40.0, 42.0, 38.0] * ENOUGH_DAYS)
+        reference = _daily_series([41000.0, 42000.0, 39000.0] * ENOUGH_DAYS)
         assert _counter_unit_scale(counter, reference, TZ) == 1000.0
 
     def test_wh_counter_read_as_kwh_scales_down_1000x(self):
-        counter = _daily_series([40000000.0, 42000000.0, 38000000.0])
-        reference = _daily_series([41000.0, 42000.0, 39000.0])
+        counter = _daily_series([40000000.0, 42000000.0, 38000000.0] * ENOUGH_DAYS)
+        reference = _daily_series([41000.0, 42000.0, 39000.0] * ENOUGH_DAYS)
         assert _counter_unit_scale(counter, reference, TZ) == 0.001
+
+    def test_too_few_overlapping_days_trusts_counter(self):
+        # A 1000x-looking ratio over only a few days is treated as noise (e.g. a
+        # partially-completed reference query), not a real unit mismatch.
+        counter = _daily_series([40.0] * (ENOUGH_DAYS - 1))
+        reference = _daily_series([41000.0] * (ENOUGH_DAYS - 1))
+        assert _counter_unit_scale(counter, reference, TZ) == 1.0
 
     def test_moderate_disagreement_trusts_counter(self):
         # Only an almost-exact 1000x mismatch is auto-corrected; anything else
