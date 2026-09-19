@@ -47,6 +47,12 @@ COLOR_YELLOW = "#dfaf2c"
 COLOR_BLUE = "#345f94"
 COLOR_GREEN = "#428c46"
 
+# Outage scope colors/labels, shared by the calendar's strips, counts and legend.
+SCOPE_ORDER = ("isp", "local", "unknown")
+SCOPE_COLORS = {"isp": COLOR_RED, "local": COLOR_BLUE, "unknown": COLOR_BLACK}
+SCOPE_LETTERS = {"isp": "I", "local": "L", "unknown": "?"}
+SCOPE_NAMES = {"isp": "ISP", "local": "Local", "unknown": "Unknown"}
+
 DEFAULT_TITLE = "Internet Outage Monitor"
 
 
@@ -119,7 +125,7 @@ class _InfluxStore:
         self.raw_bucket = raw_bucket
         self.bucket = bucket
         self.verify_ssl = verify_ssl
-        self._outages = []  # [(start_ts, end_ts, or None while still ongoing)]
+        self._outages = []  # [(start_ts, end_ts or None while ongoing, scope)]
         self._gaps = []
         self._first_started_ts = None
         self.last_sample_ts = None
@@ -168,10 +174,11 @@ class _InfluxStore:
             start_ts, end_ts = _parse_influx_time(row.get("_time")), _parse_int(row.get("end_ts"))
             if start_ts is None or end_ts is None:
                 continue
+            scope = row.get("scope") if row.get("scope") in ("isp", "local") else "unknown"
             if end_ts == 0:  # daemon writes 0 while an outage is still open
                 end_ts = None
-                self.outage_scope = row.get("scope") or None
-            self._outages.append((start_ts, end_ts))
+                self.outage_scope = scope
+            self._outages.append((start_ts, end_ts, scope))
 
         self._gaps = []
         for row in self._pivoted("gap", start):
@@ -208,17 +215,22 @@ class _InfluxStore:
         samples.sort()
         return samples
 
-    def get_outages(self, since_ts, until_ts, now_ts):
+    def get_outages_scoped(self, since_ts, until_ts, now_ts):
+        """[(start_ts, end_ts, scope)] overlapping the window; scope is 'isp',
+        'local' or 'unknown' (e.g. history imported from before scope was tracked)."""
         # An outage still open when the daemon stopped reporting ends at the last
         # sample instead of running on to "now".
         open_end = now_ts
         if self.last_sample_ts is not None and now_ts - self.last_sample_ts > STALE_SAMPLE_SECONDS:
             open_end = self.last_sample_ts
         return [
-            (start, end if end is not None else max(start, open_end))
-            for start, end in self._outages
+            (start, end if end is not None else max(start, open_end), scope)
+            for start, end, scope in self._outages
             if (end is None or end >= since_ts) and start <= until_ts
         ]
+
+    def get_outages(self, since_ts, until_ts, now_ts):
+        return [(start, end) for start, end, _scope in self.get_outages_scoped(since_ts, until_ts, now_ts)]
 
     def get_gaps(self, since_ts, until_ts):
         return [(start, end) for start, end in self._gaps if end >= since_ts and start <= until_ts]
@@ -464,7 +476,7 @@ class NetworkMonitor(BasePlugin):
         if latest and latest[3] is not None:
             draw.text((lx, legend_y), f"Ping {latest[3]:.0f} ms", font=legend_font, fill=COLOR_BLACK, anchor="la")
 
-        chart_top = legend_y + swatch + pad
+        chart_top = legend_y + swatch + pad + fonts["small"].size // 2 + 2
         chart_bottom = y1 - pad * 2 - fonts["small"].size - 6
         chart_left = x0 + pad + 48
         chart_right = x1 - pad
@@ -707,7 +719,8 @@ class NetworkMonitor(BasePlugin):
         draw.text((x0 + pad, y0 + pad), "Outages By Day (4 Weeks)", font=fonts["label"], fill=COLOR_BLACK, anchor="la")
 
         header_h = fonts["small"].size + 6
-        grid_top = y0 + fonts["label"].size + pad * 3 + header_h
+        legend_h = fonts["small"].size + 6
+        grid_top = y0 + fonts["label"].size + pad * 3 + legend_h + header_h
         grid_bottom = y1 - pad
         grid_left = x0 + pad
         grid_right = x1 - pad
@@ -720,8 +733,12 @@ class NetworkMonitor(BasePlugin):
 
         first_started_ts = self._store.get_meta_int("first_started_ts", now_ts)
         window_start_ts = int(tz.localize(datetime.combine(start_date, datetime.min.time())).timestamp())
-        all_outages = self._filter_outages(self._store.get_outages(window_start_ts, now_ts, now_ts), min_outage_seconds)
+        all_outages = [
+            o for o in self._store.get_outages_scoped(window_start_ts, now_ts, now_ts)
+            if o[1] - o[0] >= min_outage_seconds
+        ]
         all_gaps = self._store.get_gaps(window_start_ts, now_ts)
+        self._draw_scope_legend(draw, x0 + pad, y0 + fonts["label"].size + pad * 2, fonts["small"], {o[2] for o in all_outages})
 
         for c in range(cols):
             wd_date = start_date + timedelta(days=c)
@@ -745,10 +762,12 @@ class NetworkMonitor(BasePlugin):
             day_end_ts = day_start_ts + 86400
 
             fill = None
+            scope_counts = {}
             if day_start_ts <= now_ts and day_end_ts > first_started_ts:
                 gap_secs = self._overlap_seconds(all_gaps, day_start_ts, day_end_ts)
                 if gap_secs < 23 * 3600:
-                    count = sum(1 for start, _end in all_outages if day_start_ts <= start < day_end_ts)
+                    scope_counts = self._scope_counts(all_outages, day_start_ts, day_end_ts)
+                    count = sum(scope_counts.values())
                     if count == 0:
                         fill = COLOR_GREEN
                     elif count <= 2:
@@ -764,6 +783,56 @@ class NetworkMonitor(BasePlugin):
 
             text_color = COLOR_WHITE if fill == COLOR_RED else COLOR_BLACK
             draw.text((cx0 + 4, cy0 + 2), str(day_date.day), font=fonts["small"], fill=text_color, anchor="la")
+            self._draw_scope_markers(draw, (cx0, cy0, cx1, cy1), scope_counts, fonts["small"], text_color)
+
+    @staticmethod
+    def _scope_counts(outages, day_start_ts, day_end_ts):
+        """{scope: number of outages starting within the day}, non-zero scopes only."""
+        counts = {}
+        for start, _end, scope in outages:
+            if day_start_ts <= start < day_end_ts:
+                counts[scope] = counts.get(scope, 0) + 1
+        return counts
+
+    @staticmethod
+    def _format_scope_counts(counts):
+        """e.g. {'isp': 2, 'local': 1} -> 'I2 L1' (fixed scope order)."""
+        return " ".join(f"{SCOPE_LETTERS[s]}{counts[s]}" for s in SCOPE_ORDER if counts.get(s))
+
+    def _draw_scope_markers(self, draw, cell, counts, font, text_color):
+        """A thin strip along the cell's bottom edge split by scope in proportion to
+        outage counts, with the counts as text above it when they fit."""
+        if not counts:
+            return
+        cx0, cy0, cx1, cy1 = cell
+        strip_h = max(4, round((cy1 - cy0) * 0.16))
+        strip_top = cy1 - strip_h - 1
+        total = sum(counts.values())
+        x = cx0 + 1
+        span = (cx1 - cx0) - 2
+        for scope in SCOPE_ORDER:
+            if counts.get(scope):
+                seg_w = span * counts[scope] / total
+                draw.rectangle([x, strip_top, x + seg_w, cy1 - 1], fill=SCOPE_COLORS[scope])
+                x += seg_w
+        draw.rectangle([cx0 + 1, strip_top, cx1 - 1, cy1 - 1], outline=COLOR_BLACK, width=1)
+
+        text = self._format_scope_counts(counts)
+        if draw.textlength(text, font=font) <= (cx1 - cx0) - 4 and strip_top - cy0 >= font.size * 2 + 2:
+            draw.text(((cx0 + cx1) / 2, strip_top - 2), text, font=font, fill=text_color, anchor="ms")
+
+    @staticmethod
+    def _draw_scope_legend(draw, x, y, font, scopes_present):
+        # Only scopes that actually occur in the window, so a display with no
+        # "unknown" history doesn't carry a meaningless legend entry.
+        swatch = font.size
+        for scope in SCOPE_ORDER:
+            if scope not in scopes_present:
+                continue
+            label = f"{SCOPE_LETTERS[scope]} {SCOPE_NAMES[scope]}"
+            draw.rectangle([x, y, x + swatch, y + swatch], fill=SCOPE_COLORS[scope], outline=COLOR_BLACK)
+            draw.text((x + swatch + 4, y), label, font=font, fill=COLOR_BLACK, anchor="la")
+            x += swatch + 4 + draw.textlength(label, font=font) + 12
 
     @staticmethod
     def _overlap_seconds(episodes, window_start, window_end):
