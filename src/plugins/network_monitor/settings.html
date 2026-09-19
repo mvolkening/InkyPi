@@ -40,6 +40,12 @@
 </div>
 
 <div class="form-group nowrap">
+    <label for="speedMaxMbps" class="form-label">Speed Graph Scale</label>
+    <input type="number" id="speedMaxMbps" name="speedMaxMbps" class="form-input" min="1" step="1" value="500">Mbps
+    <span title="Fixed top of the speed graph's y-axis - set this to your plan's speed (e.g. 500 for a 500/500 plan). Readings above it are drawn at the top edge.">&#9432;</span>
+</div>
+
+<div class="form-group nowrap">
     <label for="minOutageSeconds" class="form-label">Minimum Outage Duration</label>
     <input type="number" id="minOutageSeconds" name="minOutageSeconds" class="form-input" min="0" max="300" step="1" value="2">sec
     <span title="Outages shorter than this are treated as noise (e.g. a single dropped packet) and left out of the sparklines, hourly histogram, and calendar. Set to 0 to count every failed ping. The live Online/Outage status above always reflects the ping happening right now, regardless of this setting.">&#9432;</span>
@@ -90,6 +96,7 @@
             document.getElementById('influxOrg').value = pluginSettings.influxOrg || 'none';
             document.getElementById('rawBucket').value = pluginSettings.rawBucket || 'netmon_raw';
             document.getElementById('influxBucket').value = pluginSettings.influxBucket || 'netmon';
+            document.getElementById('speedMaxMbps').value = pluginSettings.speedMaxMbps || 500;
             document.getElementById('minOutageSeconds').value = pluginSettings.minOutageSeconds || 2;
             document.getElementById('weekStart').value = pluginSettings.weekStart || 'sunday';
             historyWeeksInput.value = pluginSettings.historyWeeks || 4;

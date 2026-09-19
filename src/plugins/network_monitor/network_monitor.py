@@ -22,6 +22,9 @@ DEFAULT_INFLUX_ORG = "none"
 DEFAULT_RAW_BUCKET = "netmon_raw"
 DEFAULT_BUCKET = "netmon"
 SPEEDTEST_WINDOW_HOURS = 48
+# Speed graph's fixed y-axis top, matched to the subscribed plan so a glance shows
+# how close to the plan speed the link is; override per instance with `speedMaxMbps`.
+DEFAULT_SPEED_MAX_MBPS = 500
 
 # (connect, read) timeouts for the LAN-hosted, Pi-backed InfluxDB.
 REQUEST_TIMEOUT = (5, 30)
@@ -306,7 +309,7 @@ class NetworkMonitor(BasePlugin):
             history_weeks = self._parse_history_weeks(settings)
             week_start = self._parse_week_start(settings)
             aggregation = self._parse_aggregation(settings)
-            self._draw_left_column(draw, left_box, now_ts, tz, fonts, min_outage_seconds, time_format)
+            self._draw_left_column(draw, left_box, now_ts, tz, fonts, min_outage_seconds, time_format, self._parse_speed_max(settings))
             self._draw_histogram(draw, histogram_box, now_ts, tz, fonts, min_outage_seconds, history_weeks, week_start, aggregation)
             self._draw_calendar(draw, calendar_box, now_ts, tz, fonts, min_outage_seconds)
         except InfluxQueryError as e:
@@ -314,6 +317,14 @@ class NetworkMonitor(BasePlugin):
             raise RuntimeError("Failed to retrieve network monitor data from InfluxDB, please check logs.")
 
         return image
+
+    @staticmethod
+    def _parse_speed_max(settings):
+        try:
+            value = float(settings.get("speedMaxMbps"))
+        except (TypeError, ValueError):
+            value = DEFAULT_SPEED_MAX_MBPS
+        return value if value > 0 else DEFAULT_SPEED_MAX_MBPS
 
     @staticmethod
     def _parse_min_outage_seconds(settings):
@@ -404,7 +415,7 @@ class NetworkMonitor(BasePlugin):
             updated_str = f"Updated {updated_dt.strftime('%I:%M:%S %p').lstrip('0')}"
             draw.text((badge_left - pad, title_height / 2), updated_str, font=fonts["small"], fill=COLOR_BLACK, anchor="rm")
 
-    def _draw_left_column(self, draw, box, now_ts, tz, fonts, min_outage_seconds, time_format):
+    def _draw_left_column(self, draw, box, now_ts, tz, fonts, min_outage_seconds, time_format, speed_max_mbps):
         """Ping sparklines for the last hour (top) and 12 hours (bottom), with the
         speed-test history between them."""
         x0, y0, x1, y1 = box
@@ -415,14 +426,14 @@ class NetworkMonitor(BasePlugin):
             top = y0 + i * (panel_h + gap)
             panel_box = (x0, top, x1, top + panel_h)
             if span is None:
-                self._draw_speed_panel(draw, panel_box, now_ts, tz, fonts)
+                self._draw_speed_panel(draw, panel_box, now_ts, tz, fonts, speed_max_mbps)
                 continue
             since_ts = now_ts - span
             samples = self._store.get_samples(since_ts, now_ts)
             outages = self._filter_outages(self._store.get_outages(since_ts, now_ts, now_ts), min_outage_seconds)
             self._draw_sparkline_panel(draw, panel_box, label, since_ts, now_ts, samples, outages, fonts, tz, time_format)
 
-    def _draw_speed_panel(self, draw, box, now_ts, tz, fonts):
+    def _draw_speed_panel(self, draw, box, now_ts, tz, fonts, y_max):
         """Download/upload throughput from the daemon's scheduled speed tests over
         the last SPEEDTEST_WINDOW_HOURS, plus the most recent reading."""
         x0, y0, x1, y1 = box
@@ -432,7 +443,7 @@ class NetworkMonitor(BasePlugin):
         since_ts = now_ts - SPEEDTEST_WINDOW_HOURS * 3600
         tests = self._store.get_speedtests(since_ts)
 
-        draw.text((x0 + pad, y0 + pad), f"Speed Test (Last {SPEEDTEST_WINDOW_HOURS} Hours)", font=fonts["label"], fill=COLOR_BLACK, anchor="la")
+        draw.text((x0 + pad, y0 + pad), f"Speed Test - Mbps (Last {SPEEDTEST_WINDOW_HOURS} Hours)", font=fonts["label"], fill=COLOR_BLACK, anchor="la")
 
         # Legend row doubles as the latest reading so the current numbers are visible
         # without reading them off the chart.
@@ -464,13 +475,13 @@ class NetworkMonitor(BasePlugin):
             return
 
         span = SPEEDTEST_WINDOW_HOURS * 3600
-        y_max = max(max(t[1], t[2]) for t in tests) or 1.0
 
         def x_of(ts):
             return chart_left + (min(max(ts, since_ts), now_ts) - since_ts) / span * (chart_right - chart_left)
 
         def y_of(value):
-            return chart_bottom - (value / y_max) * (chart_bottom - chart_top)
+            # Fixed scale: a burst above it is pinned to the top edge, not allowed to stretch the axis.
+            return chart_bottom - (min(value, y_max) / y_max) * (chart_bottom - chart_top)
 
         for frac in (0.25, 0.5, 0.75):
             gy = chart_bottom - frac * (chart_bottom - chart_top)
@@ -491,7 +502,7 @@ class NetworkMonitor(BasePlugin):
 
         draw.text((x0 + pad, chart_top), f"{int(y_max)}", font=fonts["small"], fill=COLOR_BLACK, anchor="lm")
         draw.text((x0 + pad, chart_bottom), "0", font=fonts["small"], fill=COLOR_BLACK, anchor="lm")
-        draw.text((x0 + pad, (chart_top + chart_bottom) / 2), "Mbps", font=fonts["small"], fill=COLOR_BLACK, anchor="lm")
+        draw.text((x0 + pad, (chart_top + chart_bottom) / 2), f"{int(y_max / 2)}", font=fonts["small"], fill=COLOR_BLACK, anchor="lm")
 
         tick_y = chart_bottom + 4
         for frac, h_anchor in ((0.0, "l"), (0.25, "m"), (0.5, "m"), (0.75, "m"), (1.0, "r")):
