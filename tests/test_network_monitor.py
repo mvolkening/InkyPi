@@ -48,11 +48,42 @@ class TestScopes:
         # the scope-less view still works for the sparklines/histogram
         assert store.get_outages(NOW - 1000, NOW, NOW) == [(NOW - 500, NOW - 400), (NOW - 300, NOW - 200)]
 
-    def test_scope_counts_only_count_outages_starting_that_day(self):
-        outages = [(100, 200, "isp"), (300, 400, "isp"), (500, 600, "local"), (5000, 5100, "isp")]
-        assert NetworkMonitor._scope_counts(outages, 0, 1000) == {"isp": 2, "local": 1}
 
-    def test_format_scope_counts_fixed_order_and_skips_zero(self):
-        assert NetworkMonitor._format_scope_counts({"local": 1, "isp": 2}) == "I2 L1"
-        assert NetworkMonitor._format_scope_counts({"unknown": 3}) == "?3"
-        assert NetworkMonitor._format_scope_counts({}) == ""
+class TestSpeedCharts:
+    def test_monthly_stats_newest_first_with_empty_month(self):
+        import pytz
+        from datetime import datetime
+        tz = pytz.UTC
+        ts = lambda y, m, d: int(datetime(y, m, d, 12, tzinfo=pytz.UTC).timestamp())
+        tests = [
+            (ts(2026, 10, 1), 500.0, 480.0, 10.0, None),
+            (ts(2026, 10, 2), 300.0, 400.0, 20.0, None),
+            (ts(2026, 8, 5), 450.0, 450.0, None, None),
+        ]
+        rows = NetworkMonitor._monthly_stats(tests, tz, ts(2026, 10, 20), 3, 500)
+        assert [r[0] for r in rows] == ["Oct 26", "Sep 26", "Aug 26"]
+        label, down, up, min_down, slow, latency, count = rows[0]
+        assert (down, up, min_down, slow, latency, count) == (400.0, 440.0, 300.0, 50.0, 15.0, 2)
+        assert rows[1][1:] == (None, None, None, None, None, 0)
+        assert rows[2][5] is None  # no idle latency recorded
+
+    def test_aggregate(self):
+        assert NetworkMonitor._aggregate([], "average") is None
+        assert NetworkMonitor._aggregate([1, 3], "average") == 2
+        assert NetworkMonitor._aggregate([1, 3], "max") == 3
+        assert NetworkMonitor._aggregate([1, 3], "min") == 1
+
+    def test_speed_charts_render(self):
+        import pytz
+        from PIL import Image, ImageDraw
+        from plugins.network_monitor.network_monitor import get_font
+        tz = pytz.UTC
+        tests = [(NOW - h * 3600, 400.0 + h % 50, 450.0, 12.0, None) for h in range(24 * 14)]
+        image = Image.new("RGB", (800, 480), "white")
+        draw = ImageDraw.Draw(image)
+        fonts = {k: get_font("Jost", s, w) for k, s, w in (("label", 10, "bold"), ("small", 7, "normal"))}
+        plugin = NetworkMonitor({"id": "network_monitor"})
+        plugin._draw_hourly_speed(draw, (0, 0, 260, 200), tests, tz, fonts, 2, "average", 500)
+        plugin._draw_weekday_speed(draw, (0, 200, 260, 400), tests, tz, fonts, 2, "monday", "average", 500)
+        plugin._draw_stats_table(draw, (260, 0, 800, 150), tests, tz, NOW, fonts, 500)
+        assert image.getbbox() is not None

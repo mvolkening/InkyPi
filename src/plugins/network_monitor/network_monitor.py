@@ -22,6 +22,8 @@ DEFAULT_INFLUX_ORG = "none"
 DEFAULT_RAW_BUCKET = "netmon_raw"
 DEFAULT_BUCKET = "netmon"
 SPEEDTEST_WINDOW_HOURS = 48
+# Speed tests fetched for the monthly table (6 calendar months) and the hour/weekday charts.
+MONTHLY_HISTORY_DAYS = 190
 # Speed graph's fixed y-axis top, matched to the subscribed plan so a glance shows
 # how close to the plan speed the link is; override per instance with `speedMaxMbps`.
 DEFAULT_SPEED_MAX_MBPS = 500
@@ -46,12 +48,6 @@ COLOR_RED = "#a6242b"
 COLOR_YELLOW = "#dfaf2c"
 COLOR_BLUE = "#345f94"
 COLOR_GREEN = "#428c46"
-
-# Outage scope colors/labels, shared by the calendar's strips, counts and legend.
-SCOPE_ORDER = ("isp", "local", "unknown")
-SCOPE_COLORS = {"isp": COLOR_RED, "local": COLOR_BLUE, "unknown": COLOR_BLACK}
-SCOPE_LETTERS = {"isp": "I", "local": "L", "unknown": "?"}
-SCOPE_NAMES = {"isp": "ISP", "local": "Local", "unknown": "Unknown"}
 
 DEFAULT_TITLE = "Internet Outage Monitor"
 
@@ -321,9 +317,16 @@ class NetworkMonitor(BasePlugin):
             history_weeks = self._parse_history_weeks(settings)
             week_start = self._parse_week_start(settings)
             aggregation = self._parse_aggregation(settings)
-            self._draw_left_column(draw, left_box, now_ts, tz, fonts, min_outage_seconds, time_format, self._parse_speed_max(settings))
-            self._draw_histogram(draw, histogram_box, now_ts, tz, fonts, min_outage_seconds, history_weeks, week_start, aggregation)
-            self._draw_calendar(draw, calendar_box, now_ts, tz, fonts, min_outage_seconds)
+            speed_max = self._parse_speed_max(settings)
+
+            # One query feeds the monthly table and both speed-pattern charts.
+            all_tests = store.get_speedtests(now_ts - MONTHLY_HISTORY_DAYS * 86400)
+            window_start = now_ts - history_weeks * 7 * 86400
+            recent_tests = [t for t in all_tests if t[0] >= window_start]
+
+            self._draw_left_column(draw, left_box, now_ts, tz, fonts, min_outage_seconds, time_format, speed_max, all_tests)
+            self._draw_hourly_speed(draw, histogram_box, recent_tests, tz, fonts, history_weeks, aggregation, speed_max)
+            self._draw_weekday_speed(draw, calendar_box, recent_tests, tz, fonts, history_weeks, week_start, aggregation, speed_max)
         except InfluxQueryError as e:
             logger.error(f"Failed to query InfluxDB: {e}")
             raise RuntimeError("Failed to retrieve network monitor data from InfluxDB, please check logs.")
@@ -427,16 +430,19 @@ class NetworkMonitor(BasePlugin):
             updated_str = f"Updated {updated_dt.strftime('%I:%M:%S %p').lstrip('0')}"
             draw.text((badge_left - pad, title_height / 2), updated_str, font=fonts["small"], fill=COLOR_BLACK, anchor="rm")
 
-    def _draw_left_column(self, draw, box, now_ts, tz, fonts, min_outage_seconds, time_format, speed_max_mbps):
-        """Ping sparklines for the last hour (top) and 12 hours (bottom), with the
-        speed-test history between them."""
+    def _draw_left_column(self, draw, box, now_ts, tz, fonts, min_outage_seconds, time_format, speed_max_mbps, tests):
+        """Monthly speed table (top), recent speed-test history (middle) and the
+        12-hour ping sparkline (bottom)."""
         x0, y0, x1, y1 = box
         gap = round((y1 - y0) * 0.03)
         panel_h = (y1 - y0 - 2 * gap) / 3
-        panels = [("Last Hour", 3600), ("speed", None), ("Last 12 Hours", 12 * 3600)]
+        panels = [("stats", None), ("speed", None), ("Last 12 Hours", 12 * 3600)]
         for i, (label, span) in enumerate(panels):
             top = y0 + i * (panel_h + gap)
             panel_box = (x0, top, x1, top + panel_h)
+            if label == "stats":
+                self._draw_stats_table(draw, panel_box, tests, tz, now_ts, fonts, speed_max_mbps)
+                continue
             if span is None:
                 self._draw_speed_panel(draw, panel_box, now_ts, tz, fonts, speed_max_mbps)
                 continue
@@ -618,243 +624,174 @@ class NetworkMonitor(BasePlugin):
             tick_dt = datetime.fromtimestamp(tick_ts, tz)
             draw.text((tick_x, tick_y), self._format_clock_time(tick_dt, time_format), font=fonts["small"], fill=COLOR_BLACK, anchor=h_anchor + "a")
 
-    def _draw_histogram(self, draw, box, now_ts, tz, fonts, min_outage_seconds, history_weeks, week_start, aggregation):
+    @staticmethod
+    def _aggregate(values, aggregation):
+        if not values:
+            return None
+        if aggregation == "max":
+            return max(values)
+        if aggregation == "min":
+            return min(values)
+        return sum(values) / len(values)
+
+    def _draw_speed_bars(self, draw, box, title, groups, y_max, fonts, label_every=1, value_labels=False):
+        """Paired download (blue) / upload (green) bars on the plan-speed scale.
+        `groups` is [(label, down_mbps or None, up_mbps or None)]; a group with no
+        tests is left empty rather than drawn as a zero."""
         x0, y0, x1, y1 = box
         pad = 10
         draw.rectangle([x0, y0, x1, y1], outline=COLOR_BLACK, width=2)
-
-        # Fixed weekday columns (like a normal calendar), not a rolling window
-        # ending on whatever today happens to be - each column is that weekday's
-        # outage pattern, aggregated across `history_weeks` weeks if more than one.
-        if history_weeks > 1:
-            agg_label = {"max": "Max", "min": "Min", "average": "Avg"}[aggregation]
-            title = f"Outages Per Hour ({agg_label} over {history_weeks} Weeks)"
-        else:
-            title = "Outages Per Hour (This Week)"
         draw.text((x0 + pad, y0 + pad), title, font=fonts["label"], fill=COLOR_BLACK, anchor="la")
 
+        small = fonts["small"]
         chart_top = y0 + fonts["label"].size + pad * 3
-        chart_bottom = y1 - pad - fonts["small"].size - 6
-        chart_left = x0 + pad + 30
+        chart_bottom = y1 - pad - small.size - 6
+        chart_left = x0 + pad + 26
         chart_right = x1 - pad
 
-        today = datetime.fromtimestamp(now_ts, tz).date()
-        days_since_week_start = today.weekday() if week_start == "monday" else (today.weekday() + 1) % 7
-        this_week_start_date = today - timedelta(days=days_since_week_start)
+        group_w = (chart_right - chart_left) / len(groups)
+        bar_w = max(1.0, group_w * 0.4)
+        height = chart_bottom - chart_top
 
-        oldest_week_start_date = this_week_start_date - timedelta(days=7 * (history_weeks - 1))
-        window_start_ts = int(tz.localize(datetime.combine(oldest_week_start_date, datetime.min.time())).timestamp())
-        all_outages = self._filter_outages(self._store.get_outages(window_start_ts, now_ts, now_ts), min_outage_seconds)
-
-        # slot_lists[weekday_col][hour] collects one observed count per week that
-        # slot has already happened in, so weeks are compared like-for-like by
-        # weekday/hour instead of by absolute date; a still-future hour in the
-        # current (partial) week is skipped rather than counted as a zero.
-        slot_lists = [[[] for _ in range(24)] for _ in range(7)]
-        for week_offset in range(history_weeks):
-            week_start_date = this_week_start_date - timedelta(days=7 * week_offset)
-            week_start_ts = int(tz.localize(datetime.combine(week_start_date, datetime.min.time())).timestamp())
-            week_end_ts = week_start_ts + 7 * 86400
-
-            week_counts = [[0] * 24 for _ in range(7)]
-            for start, _end in all_outages:
-                if week_start_ts <= start < week_end_ts:
-                    col, hour = divmod(int((start - week_start_ts) // 3600), 24)
-                    if 0 <= col < 7:
-                        week_counts[col][hour] += 1
-
-            for col in range(7):
-                for hour in range(24):
-                    if week_start_ts + col * 86400 + hour * 3600 <= now_ts:
-                        slot_lists[col][hour].append(week_counts[col][hour])
-
-        def aggregate(values):
-            if not values:
-                return 0.0
-            if aggregation == "max":
-                return float(max(values))
-            if aggregation == "min":
-                return float(min(values))
-            return sum(values) / len(values)
-
-        values = [[aggregate(slot_lists[col][hour]) for hour in range(24)] for col in range(7)]
-        max_value = max((v for col in values for v in col), default=0.0) or 1.0
-
-        bucket_count = 7 * 24
-        bar_area_w = chart_right - chart_left
-        bar_w = bar_area_w / bucket_count
-
-        for col in range(7):
-            for hour in range(24):
-                value = values[col][hour]
-                if value <= 0:
-                    continue
-                idx = col * 24 + hour
-                bx0 = chart_left + idx * bar_w
-                bx1 = bx0 + max(bar_w, 1.0)
-                bar_h = (value / max_value) * (chart_bottom - chart_top)
-                draw.rectangle([bx0, chart_bottom - bar_h, bx1, chart_bottom], fill=COLOR_RED)
-
+        for frac in (0.5, 1.0):
+            gy = chart_bottom - frac * height
+            draw.line([(chart_left, gy), (chart_right, gy)], fill=COLOR_BLACK, width=1)
         draw.line([(chart_left, chart_bottom), (chart_right, chart_bottom)], fill=COLOR_BLACK, width=1)
-        max_value_str = f"{max_value:.1f}" if aggregation == "average" else str(int(max_value))
-        draw.text((x0 + pad, chart_top), max_value_str, font=fonts["small"], fill=COLOR_BLACK, anchor="lm")
-        draw.text((x0 + pad, chart_bottom), "0", font=fonts["small"], fill=COLOR_BLACK, anchor="lm")
+        draw.text((x0 + pad, chart_top), f"{int(y_max)}", font=small, fill=COLOR_BLACK, anchor="lm")
+        draw.text((x0 + pad, chart_top + height / 2), f"{int(y_max / 2)}", font=small, fill=COLOR_BLACK, anchor="lm")
+        draw.text((x0 + pad, chart_bottom), "0", font=small, fill=COLOR_BLACK, anchor="lm")
 
-        weekday_names = (
-            ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-            if week_start == "monday"
-            else ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
-        )
-        for day in range(8):
-            dx = chart_left + day * 24 * bar_w
-            draw.line([(dx, chart_top), (dx, chart_bottom)], fill=COLOR_BLACK, width=1)
-        for day in range(7):
-            dx = chart_left + day * 24 * bar_w
-            draw.text((dx + 2, chart_bottom + 4), weekday_names[day], font=fonts["small"], fill=COLOR_BLACK, anchor="la")
+        for idx, (label, down, up) in enumerate(groups):
+            gx = chart_left + idx * group_w
+            bx = gx + (group_w - 2 * bar_w) / 2
+            for offset, value, color in ((0, down, COLOR_BLUE), (1, up, COLOR_GREEN)):
+                if value is None:
+                    continue
+                top = chart_bottom - (min(value, y_max) / y_max) * height
+                left = bx + offset * bar_w
+                draw.rectangle([left, top, left + bar_w, chart_bottom], fill=color)
+            if value_labels and down is not None:
+                label = f"{label} {down:.0f}"
+            if idx % label_every == 0:
+                if label_every == 1:
+                    draw.text((gx + group_w / 2, chart_bottom + 4), label, font=small, fill=COLOR_BLACK, anchor="ma")
+                else:
+                    draw.text((gx, chart_bottom + 4), label, font=small, fill=COLOR_BLACK, anchor="la")
 
-    def _draw_calendar(self, draw, box, now_ts, tz, fonts, min_outage_seconds):
-        x0, y0, x1, y1 = box
-        pad = 10
-        draw.rectangle([x0, y0, x1, y1], outline=COLOR_BLACK, width=2)
-        draw.text((x0 + pad, y0 + pad), "Outages By Day (4 Weeks)", font=fonts["label"], fill=COLOR_BLACK, anchor="la")
+        # legend, right-aligned on the title row
+        swatch = small.size
+        lx = x1 - pad
+        for name, color in (("Up", COLOR_GREEN), ("Down", COLOR_BLUE)):
+            lx -= draw.textlength(name, font=small)
+            draw.text((lx, y0 + pad), name, font=small, fill=COLOR_BLACK, anchor="la")
+            lx -= swatch + 4
+            draw.rectangle([lx, y0 + pad, lx + swatch, y0 + pad + swatch], fill=color, outline=COLOR_BLACK)
+            lx -= 10
 
-        header_h = fonts["small"].size + 6
-        legend_h = fonts["small"].size + 6
-        grid_top = y0 + fonts["label"].size + pad * 3 + legend_h + header_h
-        grid_bottom = y1 - pad
-        grid_left = x0 + pad
-        grid_right = x1 - pad
-
-        today = datetime.fromtimestamp(now_ts, tz).date()
-        start_date = today - timedelta(days=27)
-        cols, rows = 7, 4
-        cell_w = (grid_right - grid_left) / cols
-        cell_h = (grid_bottom - grid_top) / rows
-
-        first_started_ts = self._store.get_meta_int("first_started_ts", now_ts)
-        window_start_ts = int(tz.localize(datetime.combine(start_date, datetime.min.time())).timestamp())
-        all_outages = [
-            o for o in self._store.get_outages_scoped(window_start_ts, now_ts, now_ts)
-            if o[1] - o[0] >= min_outage_seconds
+    def _draw_hourly_speed(self, draw, box, tests, tz, fonts, history_weeks, aggregation, y_max):
+        """Speed by hour of day, aggregated over that hour on every day in the window."""
+        slots = [([], []) for _ in range(24)]
+        for ts, down, up, _latency, _server in tests:
+            hour = datetime.fromtimestamp(ts, tz).hour
+            slots[hour][0].append(down)
+            slots[hour][1].append(up)
+        groups = [
+            (f"{hour:02d}", self._aggregate(downs, aggregation), self._aggregate(ups, aggregation))
+            for hour, (downs, ups) in enumerate(slots)
         ]
-        all_gaps = self._store.get_gaps(window_start_ts, now_ts)
-        self._draw_scope_legend(draw, x0 + pad, y0 + fonts["label"].size + pad * 2, fonts["small"], {o[2] for o in all_outages})
+        agg_label = {"max": "Max", "min": "Min", "average": "Avg"}[aggregation]
+        title = f"Speed By Hour ({agg_label}, {history_weeks} Wk)"
+        self._draw_speed_bars(draw, box, title, groups, y_max, fonts, label_every=6)
 
-        for c in range(cols):
-            wd_date = start_date + timedelta(days=c)
-            draw.text(
-                (grid_left + c * cell_w + cell_w / 2, grid_top - header_h / 2),
-                wd_date.strftime("%a"),
-                font=fonts["small"],
-                fill=COLOR_BLACK,
-                anchor="mm",
-            )
-
-        for i in range(28):
-            day_date = start_date + timedelta(days=i)
-            row, col = divmod(i, cols)
-            cx0 = grid_left + col * cell_w
-            cy0 = grid_top + row * cell_h
-            cx1 = cx0 + cell_w
-            cy1 = cy0 + cell_h
-
-            day_start_ts = int(tz.localize(datetime.combine(day_date, datetime.min.time())).timestamp())
-            day_end_ts = day_start_ts + 86400
-
-            fill = None
-            scope_counts = {}
-            if day_start_ts <= now_ts and day_end_ts > first_started_ts:
-                gap_secs = self._overlap_seconds(all_gaps, day_start_ts, day_end_ts)
-                if gap_secs < 23 * 3600:
-                    scope_counts = self._scope_counts(all_outages, day_start_ts, day_end_ts)
-                    count = sum(scope_counts.values())
-                    if count == 0:
-                        fill = COLOR_GREEN
-                    elif count <= 2:
-                        fill = COLOR_YELLOW
-                    else:
-                        fill = COLOR_RED
-
-            draw.rectangle([cx0, cy0, cx1, cy1], fill=fill or COLOR_WHITE, outline=COLOR_BLACK, width=1)
-            if fill is None:
-                self._draw_hatch(draw, (cx0, cy0, cx1, cy1))
-            if day_date == today:
-                draw.rectangle([cx0, cy0, cx1, cy1], outline=COLOR_BLACK, width=3)
-
-            text_color = COLOR_WHITE if fill == COLOR_RED else COLOR_BLACK
-            draw.text((cx0 + 4, cy0 + 2), str(day_date.day), font=fonts["small"], fill=text_color, anchor="la")
-            self._draw_scope_markers(draw, (cx0, cy0, cx1, cy1), scope_counts, fonts["small"], text_color)
+    def _draw_weekday_speed(self, draw, box, tests, tz, fonts, history_weeks, week_start, aggregation, y_max):
+        """Speed by weekday, aggregated over every test on that weekday in the window."""
+        slots = [([], []) for _ in range(7)]
+        for ts, down, up, _latency, _server in tests:
+            weekday = datetime.fromtimestamp(ts, tz).weekday()
+            slots[weekday][0].append(down)
+            slots[weekday][1].append(up)
+        names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+        order = list(range(7)) if week_start == "monday" else [6, 0, 1, 2, 3, 4, 5]
+        groups = [
+            (names[d], self._aggregate(slots[d][0], aggregation), self._aggregate(slots[d][1], aggregation))
+            for d in order
+        ]
+        agg_label = {"max": "Max", "min": "Min", "average": "Avg"}[aggregation]
+        title = f"Speed By Weekday ({agg_label}, {history_weeks} Wk)"
+        self._draw_speed_bars(draw, box, title, groups, y_max, fonts, value_labels=True)
 
     @staticmethod
-    def _scope_counts(outages, day_start_ts, day_end_ts):
-        """{scope: number of outages starting within the day}, non-zero scopes only."""
-        counts = {}
-        for start, _end, scope in outages:
-            if day_start_ts <= start < day_end_ts:
-                counts[scope] = counts.get(scope, 0) + 1
-        return counts
+    def _monthly_stats(tests, tz, now_ts, months, plan_mbps):
+        """Per-month rows, newest first: (label, avg down, avg up, min down,
+        % of tests under 80% of plan, avg idle latency, test count); a month
+        with no tests has None for every statistic."""
+        now_dt = datetime.fromtimestamp(now_ts, tz)
+        buckets = {}
+        for ts, down, up, latency, _server in tests:
+            dt = datetime.fromtimestamp(ts, tz)
+            buckets.setdefault((dt.year, dt.month), []).append((down, up, latency))
+        rows = []
+        year, month = now_dt.year, now_dt.month
+        for _ in range(months):
+            data = buckets.get((year, month), [])
+            label = datetime(year, month, 1).strftime("%b %y")
+            if data:
+                downs, ups = [d[0] for d in data], [d[1] for d in data]
+                lats = [d[2] for d in data if d[2] is not None]
+                slow = 100.0 * sum(1 for d in downs if d < 0.8 * plan_mbps) / len(downs)
+                rows.append((label, sum(downs) / len(downs), sum(ups) / len(ups), min(downs), slow,
+                             sum(lats) / len(lats) if lats else None, len(data)))
+            else:
+                rows.append((label, None, None, None, None, None, 0))
+            month -= 1
+            if month == 0:
+                year, month = year - 1, 12
+        return rows
 
-    @staticmethod
-    def _format_scope_counts(counts):
-        """e.g. {'isp': 2, 'local': 1} -> 'I2 L1' (fixed scope order)."""
-        return " ".join(f"{SCOPE_LETTERS[s]}{counts[s]}" for s in SCOPE_ORDER if counts.get(s))
-
-    def _draw_scope_markers(self, draw, cell, counts, font, text_color):
-        """A thin strip along the cell's bottom edge split by scope in proportion to
-        outage counts, with the counts as text above it when they fit."""
-        if not counts:
-            return
-        cx0, cy0, cx1, cy1 = cell
-        strip_h = max(4, round((cy1 - cy0) * 0.16))
-        strip_top = cy1 - strip_h - 1
-        total = sum(counts.values())
-        x = cx0 + 1
-        span = (cx1 - cx0) - 2
-        for scope in SCOPE_ORDER:
-            if counts.get(scope):
-                seg_w = span * counts[scope] / total
-                draw.rectangle([x, strip_top, x + seg_w, cy1 - 1], fill=SCOPE_COLORS[scope])
-                x += seg_w
-        draw.rectangle([cx0 + 1, strip_top, cx1 - 1, cy1 - 1], outline=COLOR_BLACK, width=1)
-
-        text = self._format_scope_counts(counts)
-        if draw.textlength(text, font=font) <= (cx1 - cx0) - 4 and strip_top - cy0 >= font.size * 2 + 2:
-            draw.text(((cx0 + cx1) / 2, strip_top - 2), text, font=font, fill=text_color, anchor="ms")
-
-    @staticmethod
-    def _draw_scope_legend(draw, x, y, font, scopes_present):
-        # Only scopes that actually occur in the window, so a display with no
-        # "unknown" history doesn't carry a meaningless legend entry.
-        swatch = font.size
-        for scope in SCOPE_ORDER:
-            if scope not in scopes_present:
-                continue
-            label = f"{SCOPE_LETTERS[scope]} {SCOPE_NAMES[scope]}"
-            draw.rectangle([x, y, x + swatch, y + swatch], fill=SCOPE_COLORS[scope], outline=COLOR_BLACK)
-            draw.text((x + swatch + 4, y), label, font=font, fill=COLOR_BLACK, anchor="la")
-            x += swatch + 4 + draw.textlength(label, font=font) + 12
-
-    @staticmethod
-    def _overlap_seconds(episodes, window_start, window_end):
-        total = 0
-        for start, end in episodes:
-            seg_start, seg_end = max(start, window_start), min(end, window_end)
-            if seg_end > seg_start:
-                total += seg_end - seg_start
-        return total
-
-    @staticmethod
-    def _draw_hatch(draw, box, spacing=10):
+    def _draw_stats_table(self, draw, box, tests, tz, now_ts, fonts, plan_mbps):
+        """Month-by-month speed summary, to show how the link changes as the ISP
+        adds customers to the fiber line."""
         x0, y0, x1, y1 = box
-        x0i, y0i, x1i, y1i = round(x0), round(y0), round(x1), round(y1)
-        offset = x1i - x0i + y1i - y0i
-        for d in range(0, offset, spacing):
-            x_start, y_start = x0i + d, y0i
-            if x_start > x1i:
-                y_start += x_start - x1i
-                x_start = x1i
-            x_end, y_end = x0i, y0i + d
-            if y_end > y1i:
-                x_end += y_end - y1i
-                y_end = y1i
-            draw.line([(x_start, y_start), (x_end, y_end)], fill=COLOR_BLACK, width=1)
+        pad = 8
+        draw.rectangle([x0, y0, x1, y1], outline=COLOR_BLACK, width=2)
+        draw.text((x0 + pad, y0 + pad), f"Monthly Speed Summary (Plan {int(plan_mbps)} Mbps)",
+                  font=fonts["label"], fill=COLOR_BLACK, anchor="la")
+
+        small = fonts["small"]
+        top = y0 + pad * 2 + fonts["label"].size
+        rows = self._monthly_stats(tests, tz, now_ts, 6, plan_mbps)
+        row_h = (y1 - pad - top) / (len(rows) + 1)
+
+        headers = ["Month", "Avg Down", "Avg Up", "Min Down", "<80% Plan", "Ping", "Tests"]
+        left, right = x0 + pad, x1 - pad
+        col_w = (right - left) / len(headers)
+
+        def cell_x(c):
+            # first column left-aligned, the rest right-aligned to their column edge
+            return left if c == 0 else left + (c + 1) * col_w - 4
+
+        for c, text in enumerate(headers):
+            draw.text((cell_x(c), top + row_h / 2), text, font=small, fill=COLOR_BLACK, anchor="lm" if c == 0 else "rm")
+        draw.line([(left, top + row_h), (right, top + row_h)], fill=COLOR_BLACK, width=2)
+
+        for r, (label, down, up, min_down, slow, latency, count) in enumerate(rows):
+            cy = top + (r + 1.5) * row_h
+            if r:
+                draw.line([(left, cy - row_h / 2), (right, cy - row_h / 2)], fill=COLOR_BLACK, width=1)
+            if down is None:
+                draw.text((cell_x(0), cy), label, font=small, fill=COLOR_BLACK, anchor="lm")
+                draw.text((cell_x(1), cy), "no data", font=small, fill=COLOR_BLACK, anchor="rm")
+                continue
+            # Avg Down gets a background keyed to its share of the plan so a drop reads at a glance.
+            pct = down / plan_mbps
+            color = COLOR_GREEN if pct >= 0.8 else COLOR_YELLOW if pct >= 0.5 else COLOR_RED
+            cells = [label, f"{down:.0f} ({pct * 100:.0f}%)", f"{up:.0f}", f"{min_down:.0f}", f"{slow:.0f}%",
+                     f"{latency:.0f} ms" if latency is not None else "-", str(count)]
+            for c, text in enumerate(cells):
+                text_color = COLOR_BLACK
+                if c == 1:
+                    tw = draw.textlength(text, font=small)
+                    draw.rectangle([cell_x(c) - tw - 3, cy - row_h / 2 + 1, cell_x(c) + 2, cy + row_h / 2 - 1], fill=color)
+                    if color == COLOR_RED:
+                        text_color = COLOR_WHITE
+                draw.text((cell_x(c), cy), text, font=small, fill=text_color, anchor="lm" if c == 0 else "rm")
