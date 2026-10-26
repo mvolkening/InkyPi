@@ -30,6 +30,11 @@ enabled = true
 # hourly is ~7 GB/day - raise this if your ISP has a data cap.
 interval_minutes = 60
 timeout_seconds = 180
+# speedtest-cli picks whichever server it likes (often far away), so results swing
+# wildly. To pin one, use Ookla's official CLI, e.g. EZEE Fiber Chicago:
+#   command = env HOME=/var/lib/netmon /opt/ookla/speedtest --accept-license --accept-gdpr -s 71947 -f json
+# (HOME is set because the netmon user has no home directory, where the CLI stores
+# its license acceptance; run it once as netmon with that HOME to accept the license.)
 command = speedtest-cli --json --secure
 # Wait this long before trying again after a failed test (or one skipped
 # because the internet was down).

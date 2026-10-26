@@ -609,14 +609,23 @@ class SpeedTester(threading.Thread):
 
         try:
             data = json.loads(completed.stdout)
-            download_mbps = float(data["download"]) / 1e6
-            upload_mbps = float(data["upload"]) / 1e6
+            if isinstance(data["download"], dict):
+                # Ookla's official CLI: bandwidth in bytes/s.
+                download_mbps = float(data["download"]["bandwidth"]) * 8 / 1e6
+                upload_mbps = float(data["upload"]["bandwidth"]) * 8 / 1e6
+            else:
+                # speedtest-cli: bits/s.
+                download_mbps = float(data["download"]) / 1e6
+                upload_mbps = float(data["upload"]) / 1e6
         except (ValueError, KeyError, TypeError):
             logger.warning("Could not parse speed test output: %r", completed.stdout[:200])
             return None
 
         server = (data.get("server") or {})
-        server_name = ", ".join(p for p in (server.get("sponsor"), server.get("name")) if p)
+        # speedtest-cli: sponsor + name (city); Ookla CLI: name (sponsor) + location (city).
+        server_name = ", ".join(
+            p for p in (server.get("sponsor") or server.get("name"), server.get("location") or server.get("name")) if p
+        )
         fields = [f"download_mbps={download_mbps:.2f}", f"upload_mbps={upload_mbps:.2f}"]
         if idle_latency is not None:
             fields.append(f"idle_latency_ms={idle_latency:.2f}")
