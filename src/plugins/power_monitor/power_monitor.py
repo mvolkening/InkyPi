@@ -1095,6 +1095,11 @@ class PowerMonitor(BasePlugin):
             tick_dt = datetime.fromtimestamp(tick_ts, tz)
             draw.text((tick_x, tick_y), self._format_clock_time(tick_dt, time_format), font=label_font, fill=COLOR_BLACK, anchor=h_anchor + "a")
 
+    @staticmethod
+    def _draw_bar_value(draw, cx, bar_top, value, font):
+        # Bare number (units are on the axis max label); sized to fit a ~30-bar-wide column.
+        draw.text((cx, bar_top - 1), f"{value:.0f}", font=font, fill=COLOR_BLACK, anchor="ms")
+
     def _draw_daily_bar_chart(self, draw, box, daily_energy, start_date, today, tz, fonts, daily_budget_kwh):
         x0, y0, x1, y1 = box
         pad = 8
@@ -1126,6 +1131,13 @@ class PowerMonitor(BasePlugin):
         bar_w = bar_area_w / DAILY_BAR_DAYS
         bar_gap = max(1.0, bar_w * 0.15)
 
+        label_h = fonts["small"].size + 2
+        bar_span_h = (chart_bottom - chart_top) - label_h
+
+        for frac in (0.25, 0.5, 0.75):
+            gy = chart_bottom - frac * (chart_bottom - chart_top)
+            draw.line([(chart_left, gy), (chart_right, gy)], fill=COLOR_BLACK, width=1)
+
         for i, (day_date, kwh) in enumerate(day_values):
             bx0 = chart_left + i * bar_w
             bx1 = bx0 + max(bar_w - bar_gap, 1.0)
@@ -1138,8 +1150,9 @@ class PowerMonitor(BasePlugin):
                         color = COLOR_YELLOW
                     else:
                         color = COLOR_RED
-                bar_h = (kwh / max_value) * (chart_bottom - chart_top)
+                bar_h = (kwh / max_value) * bar_span_h
                 draw.rectangle([bx0, chart_bottom - bar_h, bx1, chart_bottom], fill=color)
+                self._draw_bar_value(draw, (bx0 + bx1) / 2, chart_bottom - bar_h, kwh, fonts["small"])
             if day_date == today:
                 draw.rectangle([bx0 - 1, chart_top, bx1 + 1, chart_bottom], outline=COLOR_BLACK, width=2)
 
@@ -1195,6 +1208,14 @@ class PowerMonitor(BasePlugin):
         bar_w = bar_area_w / DAILY_BAR_DAYS
         bar_gap = max(1.0, bar_w * 0.15)
 
+        # Headroom above the tallest bar so its value label doesn't collide with the title row.
+        label_h = fonts["small"].size + 2
+        bar_span_h = (chart_bottom - chart_top) - label_h
+
+        for frac in (0.25, 0.5, 0.75):
+            gy = chart_bottom - frac * (chart_bottom - chart_top)
+            draw.line([(chart_left, gy), (chart_right, gy)], fill=COLOR_BLACK, width=1)
+
         for i, (day_date, parts) in enumerate(day_totals):
             bx0 = chart_left + i * bar_w
             bx1 = bx0 + max(bar_w - bar_gap, 1.0)
@@ -1204,9 +1225,10 @@ class PowerMonitor(BasePlugin):
                     value = parts.get(period, 0.0)
                     if value <= 0:
                         continue
-                    seg_h = (value / max_value) * (chart_bottom - chart_top)
+                    seg_h = (value / max_value) * bar_span_h
                     draw.rectangle([bx0, y_cursor - seg_h, bx1, y_cursor], fill=PERIOD_COLORS[period])
                     y_cursor -= seg_h
+                self._draw_bar_value(draw, (bx0 + bx1) / 2, y_cursor, sum(parts.values()), fonts["small"])
             if day_date == today:
                 draw.rectangle([bx0 - 1, chart_top, bx1 + 1, chart_bottom], outline=COLOR_BLACK, width=2)
 
