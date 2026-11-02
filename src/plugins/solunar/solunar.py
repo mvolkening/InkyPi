@@ -16,7 +16,7 @@ OPEN_METEO_URL = (
     "https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={long}"
     "&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_sum,"
     "wind_direction_10m_dominant,wind_speed_10m_max"
-    "&timezone=auto&forecast_days={forecast_days}"
+    "&timezone=auto&past_days={past_days}&forecast_days={forecast_days}"
 )
 OPEN_METEO_UNIT_PARAMS = {
     "metric": "temperature_unit=celsius&wind_speed_unit=kmh&precipitation_unit=mm",
@@ -27,8 +27,10 @@ UNIT_LABELS = {
     "imperial": {"temperature": "°F", "speed": "mph", "rain": "in"},
 }
 OPEN_METEO_MAX_DAYS = 16  # the free forecast endpoint's hard limit
+OPEN_METEO_PAST_DAYS = 7  # the top row can show up to a week of history
 
-DAYS_SHOWN = 29  # today + the next 28 days
+WEEKS_SHOWN = 4  # this week + three future weeks, so the grid is always full
+DAYS_SHOWN = WEEKS_SHOWN * 7
 LUNAR_CYCLE_DAYS = 29.530588853
 
 MAJOR_HALF_WIDTH = timedelta(hours=1)    # majors: moon overhead / underfoot, ~2 h window
@@ -274,18 +276,15 @@ class Solunar(BasePlugin):
             logger.error(f"Open-Meteo request failed, showing solunar data without weather: {e}")
 
         today = datetime.now(tz).date()
-        days = self.build_days(today, tz, lat, long, weather_by_date, time_format)
+        # Grid starts on the Sunday of the current week so today sits in the top row.
+        start = today - timedelta(days=(today.weekday() + 1) % 7)
+        days = self.build_days(start, today, tz, lat, long, weather_by_date, time_format)
 
         dimensions = device_config.get_resolution()
         if device_config.get_config("orientation") == "vertical":
             dimensions = dimensions[::-1]
 
-        # Calendar grid: columns are Sun..Sat, today's cell lands under its weekday.
-        lead_blanks = (today.weekday() + 1) % 7
-        cells = [None] * lead_blanks + days
-        while len(cells) % 7:
-            cells.append(None)
-        weeks = [cells[i:i + 7] for i in range(0, len(cells), 7)]
+        weeks = [days[i:i + 7] for i in range(0, len(days), 7)]
 
         now = datetime.now(tz)
         last_refresh_time = now.strftime("%Y-%m-%d %H:%M") if time_format == "24h" else now.strftime("%Y-%m-%d %I:%M %p")
@@ -306,18 +305,18 @@ class Solunar(BasePlugin):
             raise RuntimeError("Failed to take screenshot, please check logs.")
         return image
 
-    def build_days(self, today, tz, lat, long, weather_by_date, time_format):
+    def build_days(self, start, today, tz, lat, long, weather_by_date, time_format):
         # Scan a day either side so periods that spill across local midnight are still found
         # (the first/last day's neighbours also feed the sunrise/sunset overlap check).
-        start_local = tz.localize(datetime.combine(today - timedelta(days=1), datetime.min.time()))
-        end_local = tz.localize(datetime.combine(today + timedelta(days=DAYS_SHOWN + 1), datetime.min.time()))
+        start_local = tz.localize(datetime.combine(start - timedelta(days=1), datetime.min.time()))
+        end_local = tz.localize(datetime.combine(start + timedelta(days=DAYS_SHOWN + 1), datetime.min.time()))
         events = find_moon_events(start_local.astimezone(timezone.utc), end_local.astimezone(timezone.utc), lat, long)
         events = [(dt.astimezone(tz), kind) for dt, kind in events]
 
         observer = LocationInfo(latitude=lat, longitude=long).observer
         days = []
         for offset in range(DAYS_SHOWN):
-            day = today + timedelta(days=offset)
+            day = start + timedelta(days=offset)
             sunrise = self.sun_time(astral_sunrise, observer, day, tz)
             sunset = self.sun_time(astral_sunset, observer, day, tz)
 
@@ -335,7 +334,7 @@ class Solunar(BasePlugin):
                 "date": day,
                 "day_number": day.day,
                 "month_label": day.strftime("%b") if (day.day == 1 or offset == 0) else "",
-                "is_today": offset == 0,
+                "is_today": day == today,
                 "sunrise": self.format_time(sunrise, time_format),
                 "sunset": self.format_time(sunset, time_format),
                 "major": self.split_am_pm(majors, time_format),
@@ -426,7 +425,7 @@ class Solunar(BasePlugin):
         return by_date
 
     def get_weather_data(self, lat, long, units):
-        url = OPEN_METEO_URL.format(lat=lat, long=long, forecast_days=OPEN_METEO_MAX_DAYS)
+        url = OPEN_METEO_URL.format(lat=lat, long=long, past_days=OPEN_METEO_PAST_DAYS, forecast_days=OPEN_METEO_MAX_DAYS)
         url += f"&{OPEN_METEO_UNIT_PARAMS[units]}"
         response = requests.get(url, timeout=30)
         if not 200 <= response.status_code < 300:

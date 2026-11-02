@@ -30,11 +30,12 @@ def test_events_are_roughly_twelve_hours_apart():
     assert {"rise", "set"} <= {kind for _, kind in events}
 
 
-def test_build_days_covers_29_days_and_flags_high_days():
+def test_build_days_covers_28_days_and_flags_high_days():
     plugin = Solunar({"id": "solunar"})
     tz = pytz.timezone("America/Toronto")
-    days = plugin.build_days(date(2026, 11, 2), tz, 43.65, -79.38, {}, "12h")
-    assert len(days) == 29
+    days = plugin.build_days(date(2026, 11, 1), date(2026, 11, 2), tz, 43.65, -79.38, {}, "12h")
+    assert len(days) == 28
+    assert days[0]["date"] == date(2026, 11, 1) and days[1]["is_today"]
     high = {d["date"].day for d in days if d["high"]}
     assert {9, 24} <= high  # new and full moon days
     assert 2 not in high

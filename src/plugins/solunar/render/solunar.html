@@ -13,10 +13,9 @@
     {% for label in weekday_labels %}<div>{{ label }}</div>{% endfor %}
   </div>
 
-  <div class="grid" style="grid-template-rows: repeat({{ weeks | length }}, 1fr);">
+  <div class="grid" >
     {% for week in weeks %}
       {% for day in week %}
-        {% if day %}
         <div class="cell{{ ' high' if day.high else '' }}{{ ' today' if day.is_today else '' }}">
           <div class="row top">
             <span class="day-number">{{ day.day_number }}</span>
@@ -42,16 +41,13 @@
           <div class="row period major"><b>Maj</b><span>{{ day.major.am }}</span><span>{{ day.major.pm }}</span></div>
           <div class="row period minor"><b>Min</b><span>{{ day.minor.am }}</span><span>{{ day.minor.pm }}</span></div>
         </div>
-        {% else %}
-        <div class="cell blank"></div>
-        {% endif %}
       {% endfor %}
     {% endfor %}
   </div>
 
   <div class="footer">
     Major = moon overhead/underfoot &middot; Minor = moonrise/moonset &middot;
-    Temp {{ labels.temperature }} &middot; Wind {{ labels.speed }} &middot; Rain {{ labels.rain }} &middot; Weather: Open-Meteo (16 days)
+    Temp {{ labels.temperature }} &middot; Wind {{ labels.speed }} &middot; Rain {{ labels.rain }} &middot; Weather: Open-Meteo
   </div>
 </div>
 {% endblock %}
