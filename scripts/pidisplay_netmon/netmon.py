@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """Internet connectivity + speed monitor, meant to run 24/7 on a hard-wired Pi.
 
-Two jobs, both writing to a local InfluxDB v2 (stdlib only, no pip installs):
+Three jobs, all writing to a local InfluxDB v2 (stdlib only, no pip installs):
 
   1. Ping: probes a failover chain of public resolvers once a second and records
      every sample, plus derived outage / polling-gap episodes.
   2. Speed test: runs `speedtest-cli` on an adjustable schedule and records
      download / upload throughput.
+  3. DNS: once a minute, times a lookup through the default resolver and a public
+     one, so slow or failing ISP DNS shows up even when pings look fine.
 
 The InkyPi "Internet Outage Monitor" plugin reads all of this back out of
 InfluxDB and just draws it, so history survives InkyPi restarts and the ping
@@ -15,13 +17,18 @@ vantage point is the wired Pi instead of a Wi-Fi display.
 Data model
 ----------
 raw bucket (short retention, 1 point per second):
-    ping        fields: up (int 0/1), rtt_ms (float, only when up), host (str, only when up)
+    ping        fields: up (int 0/1), rtt_ms (float, only when up), host (str, only when up),
+                miss (int 0/1, only when up: 1 = the first-listed host did not answer, i.e.
+                packet loss that the failover chain would otherwise hide)
+    dns         fields: default_ms / public_ms (float, only when the lookup worked),
+                default_ok / public_ok (int 0/1)
 
 main bucket (long retention, tiny):
     outage      time = outage start; fields: end_ts (int epoch s, 0 = still ongoing),
                 scope (str: isp | local | unknown)
     gap         time = last sample before the daemon stopped; fields: end_ts (int)
-    speedtest   fields: download_mbps, upload_mbps, idle_latency_ms, server (str)
+    speedtest   fields: download_mbps, upload_mbps, idle_latency_ms, server (str);
+                with Ookla's CLI also download_latency_ms / upload_latency_ms (latency under load)
     meta        field: first_started_ts (int), written once
 
 Configuration is re-read from the config file whenever it changes, so the ping
@@ -35,6 +42,7 @@ import io
 import json
 import logging
 import os
+import random
 import shlex
 import signal
 import socket
@@ -70,10 +78,18 @@ DEFAULTS = {
     },
     "speedtest": {
         "enabled": "true",
-        "interval_minutes": "60",
+        "interval_minutes": "360",
         "timeout_seconds": "180",
         "command": "speedtest-cli --json --secure",
         "retry_minutes": "10",  # wait before retrying after a failed/skipped test
+    },
+    "dns": {
+        "enabled": "true",
+        "interval_seconds": "60",
+        "timeout_seconds": "2",
+        "default_server": "",  # blank = the resolver this Pi uses (resolv.conf), else the gateway
+        "public_server": "1.1.1.1",
+        "names": "google.com, amazon.com, wikipedia.org, microsoft.com, apple.com, netflix.com, cloudflare.com",
     },
 }
 
@@ -464,12 +480,14 @@ class PingMonitor(threading.Thread):
                 interval = self.config.get_float("ping", "interval_seconds", minimum=0.2)
                 timeout = self.config.get_float("ping", "timeout_seconds", minimum=0.2)
 
-                rtt, host, scope = self._ping_once(timeout)
+                rtt, host, scope, missed = self._ping_once(timeout)
                 ts = int(time.time())
 
                 if rtt is not None:
                     self.shared.add_rtt(rtt)
-                    self._pending_raw.append(f'ping up=1i,rtt_ms={rtt:.3f},host="{_escape_str_field(host)}" {ts}')
+                    self._pending_raw.append(
+                        f'ping up=1i,rtt_ms={rtt:.3f},host="{_escape_str_field(host)}",miss={int(missed)}i {ts}'
+                    )
                 else:
                     self._pending_raw.append(f"ping up=0i {ts}")
 
@@ -512,14 +530,15 @@ class PingMonitor(threading.Thread):
                 del self._pending_raw[: len(self._pending_raw) - MAX_BUFFERED_SAMPLES]
 
     def _ping_once(self, timeout):
-        """Returns (rtt_ms, host, scope). First host to answer wins; only if every
-        host fails is the local gateway checked, to tell a local network problem
-        apart from an ISP/backbone outage."""
-        for host in self.config.hosts():
+        """Returns (rtt_ms, host, scope, missed). First host to answer wins; only if
+        every host fails is the local gateway checked, to tell a local network problem
+        apart from an ISP/backbone outage. `missed` is True when an answer only came
+        from a later host, i.e. the first one dropped a packet."""
+        for index, host in enumerate(self.config.hosts()):
             rtt = self.prober.probe(host, timeout)
             if rtt is not None:
-                return rtt, host, None
-        return None, None, self._outage_scope(timeout)
+                return rtt, host, None, index > 0
+        return None, None, self._outage_scope(timeout), False
 
     def _outage_scope(self, timeout):
         gateway = self.config.get("ping", "gateway").strip() or self._auto_gateway()
@@ -621,6 +640,15 @@ class SpeedTester(threading.Thread):
             logger.warning("Could not parse speed test output: %r", completed.stdout[:200])
             return None
 
+        # Ookla's CLI also reports latency measured while the link is saturated
+        # (bufferbloat); speedtest-cli does not.
+        loaded = {}
+        for direction in ("download", "upload"):
+            try:
+                loaded[direction] = float(data[direction]["latency"]["iqm"])
+            except (KeyError, TypeError, ValueError):
+                pass
+
         server = (data.get("server") or {})
         # speedtest-cli: sponsor + name (city); Ookla CLI: name (sponsor) + location (city).
         server_name = ", ".join(
@@ -629,6 +657,8 @@ class SpeedTester(threading.Thread):
         fields = [f"download_mbps={download_mbps:.2f}", f"upload_mbps={upload_mbps:.2f}"]
         if idle_latency is not None:
             fields.append(f"idle_latency_ms={idle_latency:.2f}")
+        for direction, value in loaded.items():
+            fields.append(f"{direction}_latency_ms={value:.2f}")
         if server_name:
             fields.append(f'server="{_escape_str_field(server_name)}"')
 
@@ -639,6 +669,93 @@ class SpeedTester(threading.Thread):
             return None
         logger.info("Speed test: %.1f Mbps down, %.1f Mbps up (%s).", download_mbps, upload_mbps, server_name or "unknown server")
         return download_mbps, upload_mbps
+
+
+# ---------------------------------------------------------------------------
+# DNS thread
+# ---------------------------------------------------------------------------
+
+def _dns_lookup_ms(server, name, timeout):
+    """Round-trip time in ms of an A-record query sent straight to `server` over
+    UDP, or None if there was no valid answer in time. Talking to the server
+    directly (rather than getaddrinfo) bypasses this Pi's own DNS cache."""
+    query_id = random.randrange(65536)
+    packet = struct.pack(">HHHHHH", query_id, 0x0100, 1, 0, 0, 0)
+    packet += b"".join(bytes([len(label)]) + label.encode("ascii") for label in name.split(".")) + b"\x00"
+    packet += struct.pack(">HH", 1, 1)  # type A, class IN
+
+    family = socket.AF_INET6 if ":" in server else socket.AF_INET
+    deadline = time.monotonic() + timeout
+    try:
+        with socket.socket(family, socket.SOCK_DGRAM) as sock:
+            start = time.perf_counter()
+            sock.sendto(packet, (server, 53))
+            while True:
+                sock.settimeout(max(0.01, deadline - time.monotonic()))
+                reply = sock.recv(512)
+                if len(reply) >= 12 and struct.unpack(">H", reply[:2])[0] == query_id:
+                    break
+            elapsed = (time.perf_counter() - start) * 1000
+    except OSError:  # includes socket.timeout
+        return None
+    flags, _questions, answers = struct.unpack(">HHH", reply[2:8])
+    return elapsed if (flags & 0x000F) == 0 and answers > 0 else None
+
+
+def _system_resolver():
+    """First non-loopback nameserver from resolv.conf (a loopback stub such as
+    systemd-resolved would only measure a local cache), else None."""
+    try:
+        with open("/etc/resolv.conf") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 2 and parts[0] == "nameserver" and not parts[1].startswith(("127.", "::1")):
+                    return parts[1]
+    except OSError:
+        logger.debug("Could not read /etc/resolv.conf", exc_info=True)
+    return None
+
+
+class DnsMonitor(threading.Thread):
+    def __init__(self, config, influx, stop_event):
+        super().__init__(name="dns", daemon=True)
+        self.config = config
+        self.influx = influx
+        self.stop_event = stop_event
+
+    def run(self):
+        delay = 30
+        while not self.stop_event.wait(delay):
+            delay = 30
+            try:
+                self.config.reload_if_changed()
+                if not self.config.get_bool("dns", "enabled"):
+                    continue
+                delay = self.config.get_float("dns", "interval_seconds", minimum=10)
+                self._measure_once()
+            except InfluxError as e:
+                logger.warning("DNS sample could not be stored: %s", e)
+            except Exception:
+                logger.exception("Unexpected error in DNS loop; continuing")
+
+    def _measure_once(self):
+        timeout = self.config.get_float("dns", "timeout_seconds", minimum=0.5)
+        names = [n.strip() for n in self.config.get("dns", "names").split(",") if n.strip()]
+        default_server = (
+            self.config.get("dns", "default_server").strip() or _system_resolver() or _detect_default_gateway()
+        )
+        servers = {"default": default_server, "public": self.config.get("dns", "public_server").strip()}
+
+        fields = []
+        for label, server in servers.items():
+            if not server or not names:
+                continue
+            ms = _dns_lookup_ms(server, random.choice(names), timeout)
+            if ms is not None:
+                fields.append(f"{label}_ms={ms:.2f}")
+            fields.append(f"{label}_ok={int(ms is not None)}i")
+        if fields:
+            self.influx.write("raw_bucket", [f"dns {','.join(fields)} {int(time.time())}"])
 
 
 # ---------------------------------------------------------------------------
@@ -664,7 +781,11 @@ def main():
     for sig in (signal.SIGINT, signal.SIGTERM):
         signal.signal(sig, lambda *_: stop_event.set())
 
-    workers = [PingMonitor(config, influx, shared, stop_event), SpeedTester(config, influx, shared, stop_event)]
+    workers = [
+        PingMonitor(config, influx, shared, stop_event),
+        SpeedTester(config, influx, shared, stop_event),
+        DnsMonitor(config, influx, stop_event),
+    ]
     for worker in workers:
         worker.start()
     logger.info("netmon started (config: %s).", args.config)

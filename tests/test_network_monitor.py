@@ -33,12 +33,6 @@ def test_parse_influx_time_handles_fractional_seconds():
     assert _parse_influx_time("") is None
 
 
-def test_median_spacing():
-    tests = [(0, 1, 1, None, None), (3600, 1, 1, None, None), (7200, 1, 1, None, None), (20000, 1, 1, None, None)]
-    assert NetworkMonitor._median_spacing(tests) == 3600
-    assert NetworkMonitor._median_spacing(tests[:1]) == 0
-
-
 class TestScopes:
     def test_outages_keep_scope_and_unknown_is_normalized(self):
         store = _store([(NOW - 500, NOW - 400, "isp"), (NOW - 300, NOW - 200, "local")], NOW)
@@ -87,3 +81,45 @@ class TestSpeedCharts:
         plugin._draw_weekday_speed(draw, (0, 200, 260, 400), tests, tz, fonts, 2, "monday", "average", 500)
         plugin._draw_stats_table(draw, (260, 0, 800, 150), tests, tz, NOW, fonts, 500)
         assert image.getbbox() is not None
+
+
+class TestLineQuality:
+    class _FakeStore:
+        def __init__(self, quality):
+            self._quality = quality
+
+        def get_quality(self, since_ts, until_ts):
+            return self._quality
+
+    def _render(self, quality, tests):
+        import pytz
+        from PIL import Image, ImageDraw
+        from plugins.network_monitor.network_monitor import get_font
+        image = Image.new("RGB", (1000, 400), "white")
+        draw = ImageDraw.Draw(image)
+        fonts = {k: get_font("Jost", s, w) for k, s, w in (("label", 20, "bold"), ("small", 14, "normal"))}
+        plugin = NetworkMonitor({"id": "network_monitor"})
+        plugin._store = self._FakeStore(quality)
+        plugin._draw_quality_panel(draw, (0, 0, 1000, 220), NOW, pytz.UTC, fonts, "12h")
+        plugin._draw_stats_table(draw, (0, 220, 1000, 400), tests, pytz.UTC, NOW, fonts, 500, "12h")
+        return image
+
+    def test_renders_with_data_and_gaps(self):
+        quality = {
+            "loss": {0: 0.0, 5: 1.5, 23: 0.2}, "jitter": {h: 1.0 + h % 4 for h in range(24)},
+            "dns_default": {h: 8.0 for h in range(0, 24, 2)}, "dns_public": {h: 12.0 for h in range(24)},
+            "dns_failures": 3,
+        }
+        tests = [(NOW - 100, 480.0, 470.0, 12.0, None, 25.0, 40.0)]
+        assert self._render(quality, tests).getbbox() is not None
+
+    def test_renders_before_any_data_exists(self):
+        empty = {"loss": {}, "jitter": {}, "dns_default": {}, "dns_public": {}, "dns_failures": 0}
+        assert self._render(empty, []).getbbox() is not None
+
+    def test_latest_reading_drops_loaded_latency_when_missing(self):
+        plugin = NetworkMonitor({"id": "network_monitor"})
+        import pytz
+        full, short = plugin._latest_reading((NOW, 480.0, 470.0, 12.0, None, 25.0, 40.0), pytz.UTC, "12h")
+        assert "Under load 25/40 ms" in full and "Under load" not in short
+        assert plugin._latest_reading(None, pytz.UTC, "12h") == ["Latest: no speed tests yet"]

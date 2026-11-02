@@ -21,7 +21,8 @@ DEFAULT_INFLUX_URL = "http://PiDisplay.home.local:8086"
 DEFAULT_INFLUX_ORG = "none"
 DEFAULT_RAW_BUCKET = "netmon_raw"
 DEFAULT_BUCKET = "netmon"
-SPEEDTEST_WINDOW_HOURS = 48
+# Window of the hourly packet loss / jitter / DNS charts.
+QUALITY_WINDOW_HOURS = 24
 # Speed tests fetched for the monthly table (6 calendar months) and the hour/weekday charts.
 MONTHLY_HISTORY_DAYS = 190
 # Speed graph's fixed y-axis top, matched to the subscribed plan so a glance shows
@@ -237,16 +238,61 @@ class _InfluxStore:
         return default
 
     def get_speedtests(self, since_ts):
-        """[(ts, download_mbps, upload_mbps, idle_latency_ms or None, server or None)], oldest first."""
+        """[(ts, download_mbps, upload_mbps, idle_latency_ms or None, server or None,
+        latency_under_download_ms or None, latency_under_upload_ms or None)], oldest first."""
         tests = []
         for row in self._pivoted("speedtest", _to_rfc3339(since_ts)):
             ts = _parse_influx_time(row.get("_time"))
             down, up = _parse_float(row.get("download_mbps")), _parse_float(row.get("upload_mbps"))
             if ts is None or down is None or up is None:
                 continue
-            tests.append((ts, down, up, _parse_float(row.get("idle_latency_ms")), row.get("server") or None))
+            tests.append((
+                ts, down, up, _parse_float(row.get("idle_latency_ms")), row.get("server") or None,
+                _parse_float(row.get("download_latency_ms")), _parse_float(row.get("upload_latency_ms")),
+            ))
         tests.sort()
         return tests
+
+    def _hourly(self, measurement, field, since_ts, until_ts, pipeline, fn="mean"):
+        """{hour index counted from since_ts: value} for a raw-bucket field, aggregated
+        server-side (a day of 1 Hz pings is ~86k points). `since_ts` should sit on a
+        UTC hour boundary, which is what aggregateWindow aligns its windows to."""
+        rows = self._query(
+            f'from(bucket: "{_flux_escape(self.raw_bucket)}") '
+            f'|> range(start: {_to_rfc3339(since_ts)}, stop: {_to_rfc3339(until_ts + 1)}) '
+            f'|> filter(fn: (r) => r._measurement == "{measurement}" and r._field == "{field}") '
+            f'{pipeline}|> aggregateWindow(every: 1h, fn: {fn}, createEmpty: false) '
+            '|> keep(columns: ["_time", "_value"])'
+        )
+        hours = {}
+        for row in rows:
+            ts, value = _parse_influx_time(row.get("_time")), _parse_float(row.get("_value"))
+            if ts is not None and value is not None:
+                # _time is the window's end, so step back a second to land in its own hour.
+                hours[(ts - 1 - since_ts) // 3600] = value
+        return hours
+
+    def get_quality(self, since_ts, until_ts):
+        """Hourly line-quality series for the window starting at `since_ts` (a UTC hour
+        boundary): packet loss %, jitter ms, and DNS lookup ms via the default and a
+        public resolver. Each is {hour index: value}; hours without data are absent.
+        Also returns the number of failed default-resolver lookups in the window."""
+        abs_delta = (
+            '|> difference() |> map(fn: (r) => ({r with _value: if r._value < 0.0 then -r._value else r._value})) '
+        )
+        loss = {h: v * 100 for h, v in self._hourly("ping", "miss", since_ts, until_ts, "").items()}
+        jitter = self._hourly("ping", "rtt_ms", since_ts, until_ts, abs_delta)
+        dns_default = self._hourly("dns", "default_ms", since_ts, until_ts, "")
+        dns_public = self._hourly("dns", "public_ms", since_ts, until_ts, "")
+        fail_rows = self._query(
+            f'from(bucket: "{_flux_escape(self.raw_bucket)}") '
+            f'|> range(start: {_to_rfc3339(since_ts)}, stop: {_to_rfc3339(until_ts + 1)}) '
+            '|> filter(fn: (r) => r._measurement == "dns" and r._field == "default_ok" and r._value == 0) '
+            '|> group() |> count()'
+        )
+        dns_failures = sum(_parse_int(row.get("_value")) or 0 for row in fail_rows)
+        return {"loss": loss, "jitter": jitter, "dns_default": dns_default,
+                "dns_public": dns_public, "dns_failures": dns_failures}
 
 
 class NetworkMonitor(BasePlugin):
@@ -431,110 +477,134 @@ class NetworkMonitor(BasePlugin):
             draw.text((badge_left - pad, title_height / 2), updated_str, font=fonts["small"], fill=COLOR_BLACK, anchor="rm")
 
     def _draw_left_column(self, draw, box, now_ts, tz, fonts, min_outage_seconds, time_format, speed_max_mbps, tests):
-        """Monthly speed table (top), recent speed-test history (middle) and the
-        12-hour ping sparkline (bottom)."""
+        """Monthly speed table with the latest reading (top), hourly line quality
+        (middle) and the 12-hour ping sparkline (bottom)."""
         x0, y0, x1, y1 = box
         gap = round((y1 - y0) * 0.03)
-        panel_h = (y1 - y0 - 2 * gap) / 3
-        panels = [("stats", None), ("speed", None), ("Last 12 Hours", 12 * 3600)]
-        for i, (label, span) in enumerate(panels):
-            top = y0 + i * (panel_h + gap)
-            panel_box = (x0, top, x1, top + panel_h)
-            if label == "stats":
-                self._draw_stats_table(draw, panel_box, tests, tz, now_ts, fonts, speed_max_mbps)
-                continue
-            if span is None:
-                self._draw_speed_panel(draw, panel_box, now_ts, tz, fonts, speed_max_mbps)
-                continue
-            since_ts = now_ts - span
-            samples = self._store.get_samples(since_ts, now_ts)
-            outages = self._filter_outages(self._store.get_outages(since_ts, now_ts, now_ts), min_outage_seconds)
-            self._draw_sparkline_panel(draw, panel_box, label, since_ts, now_ts, samples, outages, fonts, tz, time_format)
+        # The quality panel is the busiest (title, notes and three charts), the ping line the simplest.
+        weights = (1.0, 1.15, 0.85)
+        unit = (y1 - y0 - 2 * gap) / sum(weights)
+        stats_box, quality_box, ping_box = [], [], []
+        top = y0
+        for target, weight in zip((stats_box, quality_box, ping_box), weights):
+            target.extend((x0, top, x1, top + unit * weight))
+            top += unit * weight + gap
+        self._draw_stats_table(draw, stats_box, tests, tz, now_ts, fonts, speed_max_mbps, time_format)
+        self._draw_quality_panel(draw, quality_box, now_ts, tz, fonts, time_format)
 
-    def _draw_speed_panel(self, draw, box, now_ts, tz, fonts, y_max):
-        """Download/upload throughput from the daemon's scheduled speed tests over
-        the last SPEEDTEST_WINDOW_HOURS, plus the most recent reading."""
+        since_ts = now_ts - 12 * 3600
+        samples = self._store.get_samples(since_ts, now_ts)
+        outages = self._filter_outages(self._store.get_outages(since_ts, now_ts, now_ts), min_outage_seconds)
+        self._draw_sparkline_panel(draw, ping_box, "Last 12 Hours", since_ts, now_ts, samples, outages, fonts, tz, time_format)
+
+    def _draw_quality_panel(self, draw, box, now_ts, tz, fonts, time_format):
+        """Hourly packet loss, jitter and DNS lookup time over the last
+        QUALITY_WINDOW_HOURS, as three side-by-side mini charts."""
         x0, y0, x1, y1 = box
         pad = 8
         draw.rectangle([x0, y0, x1, y1], outline=COLOR_BLACK, width=2)
+        draw.text((x0 + pad, y0 + pad), f"Line Quality - Last {QUALITY_WINDOW_HOURS} Hours",
+                  font=fonts["label"], fill=COLOR_BLACK, anchor="la")
 
-        since_ts = now_ts - SPEEDTEST_WINDOW_HOURS * 3600
-        tests = self._store.get_speedtests(since_ts)
+        hours = QUALITY_WINDOW_HOURS
+        # Hour-aligned (UTC, like the server-side windows) and ending with the current partial hour.
+        since_ts = (now_ts // 3600) * 3600 - (hours - 1) * 3600
+        data = self._store.get_quality(since_ts, now_ts)
 
-        draw.text((x0 + pad, y0 + pad), f"Speed Test - Mbps (Last {SPEEDTEST_WINDOW_HOURS} Hours)", font=fonts["label"], fill=COLOR_BLACK, anchor="la")
+        def series(key):
+            return [data[key].get(h) for h in range(hours)]
 
-        # Legend row doubles as the latest reading so the current numbers are visible
-        # without reading them off the chart.
-        legend_font = fonts["small"]
-        swatch = legend_font.size
-        legend_y = y0 + pad * 2 + fonts["label"].size
-        latest = tests[-1] if tests else None
-        entries = [
-            ("Download", COLOR_BLUE, f"{latest[1]:.0f} Mbps" if latest else None),
-            ("Upload", COLOR_GREEN, f"{latest[2]:.0f} Mbps" if latest else None),
+        loss, jitter = series("loss"), series("jitter")
+        dns_default, dns_public = series("dns_default"), series("dns_public")
+
+        top = y0 + pad * 2 + fonts["label"].size
+        col_gap = pad * 2
+        col_w = (x1 - x0 - 2 * pad - 2 * col_gap) / 3
+        cols = [(x0 + pad + i * (col_w + col_gap), x0 + pad + i * (col_w + col_gap) + col_w) for i in range(3)]
+        bottom = y1 - pad
+
+        def stats(values, unit, digits=1):
+            present = [v for v in values if v is not None]
+            if not present:
+                return "no data yet"
+            return f"avg {sum(present) / len(present):.{digits}f}{unit}, max {max(present):.{digits}f}{unit}"
+
+        def tick_label(frac):
+            dt = datetime.fromtimestamp(since_ts + frac * (hours - 1) * 3600, tz)
+            return dt.strftime("%H:00") if time_format == "24h" else dt.strftime("%I %p").lstrip("0")
+
+        dns_present = [v for v in dns_default + dns_public if v is not None]
+        dns_note = (f"{data['dns_failures']} failed" if data["dns_failures"] else
+                    ("avg " + f"{sum(dns_present) / len(dns_present):.0f} ms" if dns_present else "no data yet"))
+        charts = [
+            ("Packet Loss %", stats(loss, "%"), [(loss, COLOR_RED)], "bars", 1.0, None),
+            ("Jitter ms", stats(jitter, " ms"), [(jitter, COLOR_BLUE)], "bars", 5.0, None),
+            ("DNS Lookup ms", dns_note, [(dns_default, COLOR_BLUE), (dns_public, COLOR_GREEN)], "lines", 20.0,
+             [("Default", COLOR_BLUE), ("Public", COLOR_GREEN)]),
         ]
-        lx = x0 + pad
-        for name, color, value in entries:
-            text = f"{name} {value}" if value else name
-            draw.rectangle([lx, legend_y, lx + swatch, legend_y + swatch], fill=color, outline=COLOR_BLACK)
-            draw.text((lx + swatch + 4, legend_y), text, font=legend_font, fill=COLOR_BLACK, anchor="la")
-            lx += swatch + 6 + draw.textlength(text, font=legend_font) + 14
-        if latest and latest[3] is not None:
-            draw.text((lx, legend_y), f"Ping {latest[3]:.0f} ms", font=legend_font, fill=COLOR_BLACK, anchor="la")
+        for (cx0, cx1), (title, note, lines, kind, min_max, legend) in zip(cols, charts):
+            draw.text((cx0, top), title, font=fonts["label"], fill=COLOR_BLACK, anchor="la")
+            note_y = top + round(fonts["label"].size * 1.3)
+            small = fonts["small"]
+            lx = cx0
+            if legend:
+                for name, color in legend:
+                    draw.rectangle([lx, note_y + 1, lx + small.size - 2, note_y + small.size - 1], fill=color, outline=COLOR_BLACK)
+                    draw.text((lx + small.size + 2, note_y), name, font=small, fill=COLOR_BLACK, anchor="la")
+                    lx += small.size + 14 + draw.textlength(name, font=small)
+            draw.text((lx, note_y), note, font=small, fill=COLOR_BLACK, anchor="la")
 
-        chart_top = legend_y + swatch + pad + fonts["small"].size // 2 + 2
-        chart_bottom = y1 - pad * 2 - fonts["small"].size - 6
-        chart_left = x0 + pad + 48
-        chart_right = x1 - pad
-
-        if not tests:
-            draw.text(((chart_left + chart_right) / 2, (chart_top + chart_bottom) / 2), "No speed tests yet",
-                      font=fonts["label"], fill=COLOR_BLUE, anchor="mm")
-            return
-
-        span = SPEEDTEST_WINDOW_HOURS * 3600
-
-        def x_of(ts):
-            return chart_left + (min(max(ts, since_ts), now_ts) - since_ts) / span * (chart_right - chart_left)
-
-        def y_of(value):
-            # Fixed scale: a burst above it is pinned to the top edge, not allowed to stretch the axis.
-            return chart_bottom - (min(value, y_max) / y_max) * (chart_bottom - chart_top)
-
-        for frac in (0.25, 0.5, 0.75):
-            gy = chart_bottom - frac * (chart_bottom - chart_top)
-            draw.line([(chart_left, gy), (chart_right, gy)], fill=COLOR_BLACK, width=1)
-        draw.line([(chart_left, chart_bottom), (chart_right, chart_bottom)], fill=COLOR_BLACK, width=1)
-
-        # Tests are hours apart, so a long silence (daemon down, tests failing)
-        # breaks the line instead of drawing a misleading straight run across it.
-        gap_limit = max(3 * 3600, 2.5 * self._median_spacing(tests))
-        for column, color, width in ((2, COLOR_GREEN, 3), (1, COLOR_BLUE, 4)):
-            prev = None
-            for test in tests:
-                point = (x_of(test[0]), y_of(test[column]))
-                if prev is not None and test[0] - prev[0] <= gap_limit:
-                    draw.line([prev[1], point], fill=color, width=width)
-                draw.ellipse([point[0] - 3, point[1] - 3, point[0] + 3, point[1] + 3], fill=color)
-                prev = (test[0], point)
-
-        draw.text((x0 + pad, chart_top), f"{int(y_max)}", font=fonts["small"], fill=COLOR_BLACK, anchor="lm")
-        draw.text((x0 + pad, chart_bottom), "0", font=fonts["small"], fill=COLOR_BLACK, anchor="lm")
-        draw.text((x0 + pad, (chart_top + chart_bottom) / 2), f"{int(y_max / 2)}", font=fonts["small"], fill=COLOR_BLACK, anchor="lm")
-
-        tick_y = chart_bottom + 4
-        for frac, h_anchor in ((0.0, "l"), (0.25, "m"), (0.5, "m"), (0.75, "m"), (1.0, "r")):
-            tick_ts = since_ts + frac * span
-            tick_x = x_of(tick_ts)
-            draw.line([(tick_x, chart_bottom), (tick_x, chart_bottom + 3)], fill=COLOR_BLACK, width=1)
-            tick_dt = datetime.fromtimestamp(tick_ts, tz)
-            label = f"{tick_dt.strftime('%a')} {tick_dt.strftime('%I %p').lstrip('0')}"
-            draw.text((tick_x, tick_y), label, font=fonts["small"], fill=COLOR_BLACK, anchor=h_anchor + "a")
+            chart_top = note_y + round(small.size * 1.4) + small.size // 2
+            chart_bottom = bottom - small.size - 6
+            chart_left = cx0 + 40
+            self._draw_mini_chart(draw, (chart_left, chart_top, cx1, chart_bottom), lines, kind, min_max, fonts, hours)
+            tick_y = chart_bottom + 4
+            for frac, h_anchor, tx in ((0.0, "l", chart_left), (0.5, "m", (chart_left + cx1) / 2), (1.0, "r", cx1)):
+                draw.line([(tx, chart_bottom), (tx, chart_bottom + 3)], fill=COLOR_BLACK, width=1)
+                draw.text((tx, tick_y), tick_label(frac), font=small, fill=COLOR_BLACK, anchor=h_anchor + "a")
 
     @staticmethod
-    def _median_spacing(tests):
-        spacings = sorted(b[0] - a[0] for a, b in zip(tests, tests[1:]))
-        return spacings[len(spacings) // 2] if spacings else 0
+    def _draw_mini_chart(draw, box, lines, kind, min_max, fonts, slots):
+        """One hourly series set in `box` (bars or connected dots), with a y-axis
+        that spans 0 to at least `min_max`. `lines` is [(values per slot, color)]."""
+        x0, y0, x1, y1 = box
+        small = fonts["small"]
+        present = [v for values, _color in lines for v in values if v is not None]
+        top_value = max([min_max] + present)
+
+        def y_of(value):
+            return y1 - (value / top_value) * (y1 - y0)
+
+        for frac in (0.25, 0.5, 0.75):
+            gy = y1 - frac * (y1 - y0)
+            draw.line([(x0, gy), (x1, gy)], fill=COLOR_BLACK, width=1)
+        draw.line([(x0, y1), (x1, y1)], fill=COLOR_BLACK, width=1)
+        draw.text((x0 - 6, y0), f"{top_value:.0f}" if top_value >= 10 else f"{top_value:.1f}",
+                  font=small, fill=COLOR_BLACK, anchor="rm")
+        draw.text((x0 - 6, y1), "0", font=small, fill=COLOR_BLACK, anchor="rm")
+
+        if not present:
+            draw.text(((x0 + x1) / 2, (y0 + y1) / 2), "No data yet", font=fonts["label"], fill=COLOR_BLUE, anchor="mm")
+            return
+
+        slot_w = (x1 - x0) / slots
+        for values, color in lines:
+            prev = None
+            for i, value in enumerate(values):
+                if value is None:
+                    prev = None
+                    continue
+                cx = x0 + (i + 0.5) * slot_w
+                if kind == "bars":
+                    bar_h = max(2, y1 - y_of(value)) if value > 0 else 0
+                    if bar_h:
+                        draw.rectangle([cx - slot_w * 0.35, y1 - bar_h, cx + slot_w * 0.35, y1], fill=color, outline=COLOR_BLACK)
+                else:
+                    point = (cx, y_of(value))
+                    if prev is not None:
+                        draw.line([prev, point], fill=color, width=3)
+                    draw.ellipse([point[0] - 3, point[1] - 3, point[0] + 3, point[1] + 3], fill=color)
+                    prev = point
 
     def _format_clock_time(self, dt, time_format):
         if time_format == "24h":
@@ -727,7 +797,7 @@ class NetworkMonitor(BasePlugin):
         with no tests has None for every statistic."""
         now_dt = datetime.fromtimestamp(now_ts, tz)
         buckets = {}
-        for ts, down, up, latency, _server in tests:
+        for ts, down, up, latency, *_rest in tests:
             dt = datetime.fromtimestamp(ts, tz)
             buckets.setdefault((dt.year, dt.month), []).append((down, up, latency))
         rows = []
@@ -748,9 +818,24 @@ class NetworkMonitor(BasePlugin):
                 year, month = year - 1, 12
         return rows
 
-    def _draw_stats_table(self, draw, box, tests, tz, now_ts, fonts, plan_mbps):
+    def _latest_reading(self, test, tz, time_format):
+        """Text lines (longest first) describing the newest speed test."""
+        if test is None:
+            return ["Latest: no speed tests yet"]
+        dt = datetime.fromtimestamp(test[0], tz)
+        parts = [f"Latest {dt.strftime('%a')} {self._format_clock_time(dt, time_format)}",
+                 f"Down {test[1]:.0f} Mbps", f"Up {test[2]:.0f} Mbps"]
+        if test[3] is not None:
+            parts.append(f"Ping {test[3]:.0f} ms")
+        full = list(parts)
+        loaded = [v for v in test[5:7] if v is not None]
+        if loaded:
+            full.append("Under load " + "/".join(f"{v:.0f}" for v in loaded) + " ms")
+        return ["   |   ".join(full), "   |   ".join(parts)]
+
+    def _draw_stats_table(self, draw, box, tests, tz, now_ts, fonts, plan_mbps, time_format="12h"):
         """Month-by-month speed summary, to show how the link changes as the ISP
-        adds customers to the fiber line."""
+        adds customers to the fiber line, headed by the newest reading."""
         x0, y0, x1, y1 = box
         pad = 8
         draw.rectangle([x0, y0, x1, y1], outline=COLOR_BLACK, width=2)
@@ -758,7 +843,12 @@ class NetworkMonitor(BasePlugin):
                   font=fonts["label"], fill=COLOR_BLACK, anchor="la")
 
         small = fonts["small"]
-        top = y0 + pad * 2 + fonts["label"].size
+        latest_y = y0 + pad * 2 + fonts["label"].size
+        for text in self._latest_reading(tests[-1] if tests else None, tz, time_format):
+            if draw.textlength(text, font=small) <= x1 - x0 - 2 * pad:
+                break
+        draw.text((x0 + pad, latest_y), text, font=small, fill=COLOR_BLACK, anchor="la")
+        top = latest_y + small.size + pad
         rows = self._monthly_stats(tests, tz, now_ts, 6, plan_mbps)
         row_h = (y1 - pad - top) / (len(rows) + 1)
 

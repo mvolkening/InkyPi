@@ -20,13 +20,23 @@ in InkyPi's `.env` as `INFLUXDB_NETMON_TOKEN`.
 ## Adjusting
 
 Edit `/etc/netmon/netmon.conf`; changes are picked up within seconds, no restart.
-The main one is `[speedtest] interval_minutes` (default 60; each test moves a few hundred MB).
+The main one is `[speedtest] interval_minutes` (default 360; each test moves a few hundred MB).
 
 ```bash
 sudo nano /etc/netmon/netmon.conf
 sudo /usr/bin/python3 /opt/netmon/netmon.py --speedtest-now   # run one test immediately
 journalctl -u netmon -f                                        # watch it
 ```
+
+## What is collected
+
+- **Ping** once a second (round-trip time, outages, and `miss` = the first-listed host
+  dropped a packet even though another answered, which is how packet loss is measured).
+- **Speed tests** on the schedule above. Ookla's CLI also records latency under load.
+- **DNS** once a minute (`[dns]` section): lookup time via the default resolver and a public one.
+
+The plugin's "Line Quality" panel shows hourly packet loss, jitter (from the ping times) and
+DNS lookup time. Packet loss and DNS only have data from the point this version is deployed.
 
 ## Importing old InkyPi history
 

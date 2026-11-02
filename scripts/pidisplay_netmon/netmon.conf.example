@@ -28,7 +28,7 @@ gateway =
 enabled = true
 # How often to run a speed test. Each one moves ~300 MB at gigabit speeds, so
 # hourly is ~7 GB/day - raise this if your ISP has a data cap.
-interval_minutes = 60
+interval_minutes = 360
 timeout_seconds = 180
 # speedtest-cli picks whichever server it likes (often far away), so results swing
 # wildly. To pin one, use Ookla's official CLI, e.g. EZEE Fiber Chicago:
@@ -39,3 +39,13 @@ command = speedtest-cli --json --secure
 # Wait this long before trying again after a failed test (or one skipped
 # because the internet was down).
 retry_minutes = 10
+
+[dns]
+# Once per interval, time a lookup through the resolver this Pi uses and through a
+# public one. Slow or failing ISP DNS shows here even when pings look fine.
+enabled = true
+interval_seconds = 60
+timeout_seconds = 2
+# Blank = the nameserver in /etc/resolv.conf (or the gateway if that is a local stub).
+default_server =
+public_server = 1.1.1.1
