@@ -72,7 +72,7 @@ class TestSpeedCharts:
         from PIL import Image, ImageDraw
         from plugins.network_monitor.network_monitor import get_font
         tz = pytz.UTC
-        tests = [(NOW - h * 3600, 400.0 + h % 50, 450.0, 12.0, None) for h in range(24 * 14)]
+        tests = [(NOW - h * 3600, 400.0 + h % 50, 450.0, 12.0, None, 20.0, 30.0) for h in range(24 * 14)]
         image = Image.new("RGB", (800, 480), "white")
         draw = ImageDraw.Draw(image)
         fonts = {k: get_font("Jost", s, w) for k, s, w in (("label", 10, "bold"), ("small", 7, "normal"))}

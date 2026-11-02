@@ -761,7 +761,7 @@ class NetworkMonitor(BasePlugin):
     def _draw_hourly_speed(self, draw, box, tests, tz, fonts, history_weeks, aggregation, y_max):
         """Speed by hour of day, aggregated over that hour on every day in the window."""
         slots = [([], []) for _ in range(24)]
-        for ts, down, up, _latency, _server in tests:
+        for ts, down, up, *_rest in tests:
             hour = datetime.fromtimestamp(ts, tz).hour
             slots[hour][0].append(down)
             slots[hour][1].append(up)
@@ -776,7 +776,7 @@ class NetworkMonitor(BasePlugin):
     def _draw_weekday_speed(self, draw, box, tests, tz, fonts, history_weeks, week_start, aggregation, y_max):
         """Speed by weekday, aggregated over every test on that weekday in the window."""
         slots = [([], []) for _ in range(7)]
-        for ts, down, up, _latency, _server in tests:
+        for ts, down, up, *_rest in tests:
             weekday = datetime.fromtimestamp(ts, tz).weekday()
             slots[weekday][0].append(down)
             slots[weekday][1].append(up)
