@@ -1,0 +1,21 @@
+[Unit]
+Description=Weather forecast run logger (writes to InfluxDB)
+After=network-online.target influxdb.service
+Wants=network-online.target
+
+[Service]
+User=forecastlog
+Group=forecastlog
+ExecStart=/usr/bin/python3 /opt/forecastlog/forecastlog.py
+Restart=always
+RestartSec=30
+StateDirectory=forecastlog
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

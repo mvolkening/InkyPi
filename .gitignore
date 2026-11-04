@@ -175,3 +175,6 @@ src/plugins/network_monitor/data/
 # Static Files added by install/update_vendors.sh
 /src/static/scripts/
 /src/static/styles/
+
+# Run-aware Open-Meteo forecast cache
+src/cache/

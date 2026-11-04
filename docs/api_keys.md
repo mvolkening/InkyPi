@@ -103,3 +103,14 @@ Required for the Internet Outage Monitor Plugin
     ```
     INFLUXDB_NETMON_TOKEN=your-token
     ```
+
+## InfluxDB Token (Forecast Accuracy)
+
+Required for the Forecast Accuracy Plugin
+
+- The forecast logger in `scripts/pidisplay_forecastlog/` stores every forecast in InfluxDB (see its README)
+- Use a token with read access to the `forecast` bucket (the logger's installer creates one)
+- Store it in the .env file with the key `INFLUXDB_FORECAST_TOKEN`
+    ```
+    INFLUXDB_FORECAST_TOKEN=your-token
+    ```

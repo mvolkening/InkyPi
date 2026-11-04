@@ -1,0 +1,65 @@
+# /etc/forecastlog/forecastlog.conf
+# Re-read on every poll, so edits apply within poll_minutes without a restart.
+
+[influx]
+url = http://localhost:8086
+org = none
+# Token with read+write on the bucket below (install.sh can create one).
+token = REPLACE_ME
+bucket = forecast
+
+[open_meteo]
+# How often to check each model for a new run. The check is a tiny request; a model's
+# forecast is only downloaded when it has a run not yet recorded.
+poll_minutes = 10
+forecast_days = 16
+# Past days are stored as each model's own "actual" (its analysis).
+past_days = 3
+# Also stored: a model-independent "reference" truth from Open-Meteo's archive, rewritten
+# for this many past days each time (recent days fill in as the archive catches up).
+reference_days = 14
+
+[models]
+# Open-Meteo model name = name of its run metadata (https://api.open-meteo.com/data/<name>/static/meta.json).
+# Each is logged separately so their accuracy can be compared. Horizon at London, ON:
+#   gfs 16 d, ecmwf 14 d, ecmwf AI 15 d, jma 10 d, icon 7 d, ukmo 6 d, arpege 4 d,
+#   rrfs ~3 d, hrdps ~2 d, hrrr ~2 d (the last three are short-range, high-resolution models;
+#   days they only partly cover are not stored). HRRR runs hourly, so it adds ~24 small requests a day.
+# (Canada's GEM is left out: Open-Meteo's run metadata for it is stale, so new runs can't be detected.)
+gfs_global = ncep_gfs025
+ecmwf_ifs025 = ecmwf_ifs025
+ecmwf_aifs025_single = ecmwf_aifs025_single
+icon_global = dwd_icon
+jma_gsm = jma_gsm
+ukmo_global_deterministic_10km = ukmo_global_deterministic_10km
+meteofrance_arpege_world = meteofrance_arpege_world025
+ncep_rrfs_conus = ncep_rrfs_conus
+gem_hrdps_continental = cmc_gem_hrdps
+ncep_hrrr_conus = ncep_hrrr_conus
+
+[sources]
+# Extra, non-Open-Meteo forecasts logged alongside the models (tags met_norway / eccc / owm).
+# They publish no run metadata, so each is polled and written only when its own update stamp changes.
+met_norway = true
+# Environment Canada's official city forecast; needs a site id in [eccc_sites] (Canada only).
+eccc = true
+# OpenWeatherMap One Call 3.0; needs api_key below. NWS is left out: it only covers the US.
+owm = false
+poll_minutes = 30
+
+[met_norway]
+# MET Norway asks API users to identify themselves; add a contact if you like.
+user_agent = forecastlog/1.0 (personal weather logging project)
+
+[eccc_sites]
+# location name = Environment Canada site id (find it at https://api.weather.gc.ca/collections/citypageweather-realtime/items)
+home = on-137
+
+[owm]
+api_key =
+# OpenWeatherMap publishes no update stamp, so it is simply sampled this often.
+interval_minutes = 360
+
+[locations]
+# name = latitude, longitude, timezone   (the timezone is needed by the extra sources)
+home = 42.6785, -81.6755, America/Toronto

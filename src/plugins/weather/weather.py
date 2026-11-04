@@ -1,4 +1,5 @@
 from plugins.base_plugin.base_plugin import BasePlugin
+from utils.forecast_cache import fetch_open_meteo
 from PIL import Image
 import os
 import requests
@@ -52,7 +53,7 @@ WEATHER_URL = "https://api.openweathermap.org/data/3.0/onecall?lat={lat}&lon={lo
 AIR_QUALITY_URL = "http://api.openweathermap.org/data/2.5/air_pollution?lat={lat}&lon={long}&appid={api_key}"
 GEOCODING_URL = "http://api.openweathermap.org/geo/1.0/reverse?lat={lat}&lon={long}&limit=1&appid={api_key}"
 
-OPEN_METEO_FORECAST_URL = "https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={long}&hourly=weather_code,temperature_2m,precipitation,precipitation_probability,relative_humidity_2m,surface_pressure,visibility&daily=weathercode,temperature_2m_max,temperature_2m_min,sunrise,sunset&current=temperature,windspeed,winddirection,is_day,precipitation,weather_code,apparent_temperature&timezone=auto&models=best_match&forecast_days={forecast_days}"
+OPEN_METEO_FORECAST_URL = "https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={long}&hourly=weather_code,temperature_2m,apparent_temperature,is_day,wind_speed_10m,wind_direction_10m,precipitation,precipitation_probability,relative_humidity_2m,surface_pressure,visibility&daily=weathercode,temperature_2m_max,temperature_2m_min,sunrise,sunset&current=temperature,windspeed,winddirection,is_day,precipitation,weather_code,apparent_temperature&timezone=auto&models=best_match&forecast_days={forecast_days}"
 OPEN_METEO_AIR_QUALITY_URL = "https://air-quality-api.open-meteo.com/v1/air-quality?latitude={lat}&longitude={long}&hourly=european_aqi,uv_index,uv_index_clear_sky&timezone=auto"
 OPEN_METEO_UNIT_PARAMS = {
     "standard": "temperature_unit=celsius&wind_speed_unit=ms&precipitation_unit=mm",  # temperature is converted to Kelvin later
@@ -764,22 +765,47 @@ class Weather(BasePlugin):
     def get_open_meteo_data(self, lat, long, units, forecast_days):
         unit_params = OPEN_METEO_UNIT_PARAMS[units]
         url = OPEN_METEO_FORECAST_URL.format(lat=lat, long=long, forecast_days=forecast_days) + f"&{unit_params}"
-        response = requests.get(url, timeout=30)
+        # Only downloads when Open-Meteo's model has produced a new run since the last call.
+        data, refreshed = fetch_open_meteo(url)
+        if not refreshed:
+            # "current" is a snapshot from download time; rebuild it from the hourly forecast.
+            data = self.current_from_hourly(data)
+        return data
 
-        if not 200 <= response.status_code < 300:
-            logger.error(f"Failed to retrieve Open-Meteo weather data: {response.content}")
-            raise RuntimeError("Failed to retrieve Open-Meteo weather data.")
-        
-        return response.json()
+    @staticmethod
+    def current_from_hourly(data):
+        """Return a copy of a cached Open-Meteo response whose `current` block reflects the present hour."""
+        hourly = data.get("hourly", {})
+        times = hourly.get("time", [])
+        now = datetime.now(timezone.utc) + timedelta(seconds=data.get("utc_offset_seconds", 0) or 0)
+        now_str = now.strftime("%Y-%m-%dT%H:00")
+        if now_str not in times:
+            return data
+        i = times.index(now_str)
+
+        def pick(key, default=None):
+            values = hourly.get(key, [])
+            return values[i] if i < len(values) and values[i] is not None else default
+
+        temperature = pick("temperature_2m", 0)
+        wind_speed, wind_dir = pick("wind_speed_10m", 0), pick("wind_direction_10m", 0)
+        current = dict(data.get("current", {}))
+        current.update({
+            "time": now_str,
+            "weather_code": pick("weather_code", 0),
+            "is_day": pick("is_day", 1),
+            "temperature": temperature,
+            "apparent_temperature": pick("apparent_temperature", temperature),
+            "windspeed": wind_speed,
+            "winddirection": wind_dir,
+        })
+        return dict(data, current=current)
 
     def get_open_meteo_air_quality(self, lat, long):
         url = OPEN_METEO_AIR_QUALITY_URL.format(lat=lat, long=long)
-        response = requests.get(url, timeout=30)
-        if not 200 <= response.status_code < 300:
-            logger.error(f"Failed to retrieve Open-Meteo air quality data: {response.content}")
-            raise RuntimeError("Failed to retrieve Open-Meteo air quality data.")
-        
-        return response.json()
+        # Air quality has no model-run metadata; it is refreshed about hourly, so cache for an hour.
+        data, _ = fetch_open_meteo(url, run_model=None, max_age=3600)
+        return data
     
     def format_time(self, dt, time_format, hour_only=False, include_am_pm=True):
         """Format datetime based on 12h or 24h preference"""

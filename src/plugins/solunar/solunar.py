@@ -4,11 +4,11 @@ import os
 from datetime import date, datetime, timedelta, timezone
 
 import pytz
-import requests
 from astral import LocationInfo
 from astral.sun import sunrise as astral_sunrise, sunset as astral_sunset
 
 from plugins.base_plugin.base_plugin import BasePlugin
+from utils.forecast_cache import fetch_open_meteo
 
 logger = logging.getLogger(__name__)
 
@@ -427,8 +427,6 @@ class Solunar(BasePlugin):
     def get_weather_data(self, lat, long, units):
         url = OPEN_METEO_URL.format(lat=lat, long=long, past_days=OPEN_METEO_PAST_DAYS, forecast_days=OPEN_METEO_MAX_DAYS)
         url += f"&{OPEN_METEO_UNIT_PARAMS[units]}"
-        response = requests.get(url, timeout=30)
-        if not 200 <= response.status_code < 300:
-            logger.error(f"Failed to retrieve Open-Meteo weather data: {response.content}")
-            raise RuntimeError("Failed to retrieve Open-Meteo weather data.")
-        return response.json()
+        # Only downloads when Open-Meteo's model has produced a new run since the last call.
+        data, _ = fetch_open_meteo(url)
+        return data
