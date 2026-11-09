@@ -21,6 +21,13 @@ DEFAULT_INFLUX_URL = "http://PiDisplay.home.local:8086"
 DEFAULT_INFLUX_ORG = "none"
 DEFAULT_RAW_BUCKET = "netmon_raw"
 DEFAULT_BUCKET = "netmon"
+# Optional internet-usage panel: Home Assistant writes the router's cumulative
+# byte counters into its own bucket (sensor.exos_router_data_received / _sent).
+# It needs its own read token (INFLUXDB_HA_TOKEN); without one the panel is skipped.
+DEFAULT_USAGE_BUCKET = "homeassistant"
+USAGE_TOKEN_KEY = "INFLUXDB_HA_TOKEN"
+USAGE_ENTITY_REGEX = "exos_router_data_(received|sent)"
+USAGE_DAYS = 14
 # Window of the hourly packet loss / jitter / DNS charts.
 QUALITY_WINDOW_HOURS = 24
 # Speed tests fetched for the monthly table (6 calendar months) and the hour/weekday charts.
@@ -294,6 +301,38 @@ class _InfluxStore:
         return {"loss": loss, "jitter": jitter, "dns_default": dns_default,
                 "dns_public": dns_public, "dns_failures": dns_failures}
 
+    def get_daily_usage(self, days, tz_name):
+        """Bytes downloaded / uploaded per local calendar day for the last `days`
+        days (oldest first, today last), from Home Assistant's cumulative router
+        byte counters. {"dates": [date], "down": [bytes|None], "up": [bytes|None]}.
+        The counters are read hourly and differenced (a reset counts as zero for
+        that hour), then summed per local day server-side."""
+        rows = self._query(
+            'import "timezone"\n'
+            f'option location = timezone.location(name: "{_flux_escape(tz_name)}")\n'
+            f'from(bucket: "{_flux_escape(self.bucket)}") |> range(start: -{days + 1}d) '
+            f'|> filter(fn: (r) => r._field == "value" and r.entity_id =~ /^{USAGE_ENTITY_REGEX}$/) '
+            '|> aggregateWindow(every: 1h, fn: last, createEmpty: false) '
+            '|> difference(nonNegative: true) '
+            '|> aggregateWindow(every: 1d, fn: sum, createEmpty: true) '
+            '|> keep(columns: ["_time", "_value", "entity_id"])'
+        )
+        tz = pytz.timezone(tz_name)
+        by_day = {"down": {}, "up": {}}
+        for row in rows:
+            ts, value = _parse_influx_time(row.get("_time")), _parse_float(row.get("_value"))
+            if ts is None or value is None:
+                continue
+            # aggregateWindow stamps a window with its end, so step back into the day it covers.
+            day = datetime.fromtimestamp(ts - 3600, tz).date()
+            key = "down" if row.get("entity_id", "").endswith("received") else "up"
+            by_day[key][day] = by_day[key].get(day, 0.0) + value
+        today = datetime.now(tz).date()
+        dates = [today - timedelta(days=d) for d in range(days - 1, -1, -1)]
+        return {"dates": dates,
+                "down": [by_day["down"].get(d) for d in dates],
+                "up": [by_day["up"].get(d) for d in dates]}
+
 
 class NetworkMonitor(BasePlugin):
     def generate_settings_template(self):
@@ -370,7 +409,8 @@ class NetworkMonitor(BasePlugin):
             window_start = now_ts - history_weeks * 7 * 86400
             recent_tests = [t for t in all_tests if t[0] >= window_start]
 
-            self._draw_left_column(draw, left_box, now_ts, tz, fonts, min_outage_seconds, time_format, speed_max, all_tests)
+            usage = self._load_usage(settings, device_config, influx_url, influx_org, raw_bucket, verify_ssl, timezone_name)
+            self._draw_left_column(draw, left_box, now_ts, tz, fonts, min_outage_seconds, time_format, speed_max, all_tests, usage)
             self._draw_hourly_speed(draw, histogram_box, recent_tests, tz, fonts, history_weeks, aggregation, speed_max)
             self._draw_weekday_speed(draw, calendar_box, recent_tests, tz, fonts, history_weeks, week_start, aggregation, speed_max)
         except InfluxQueryError as e:
@@ -378,6 +418,20 @@ class NetworkMonitor(BasePlugin):
             raise RuntimeError("Failed to retrieve network monitor data from InfluxDB, please check logs.")
 
         return image
+
+    @staticmethod
+    def _load_usage(settings, device_config, url, org, raw_bucket, verify_ssl, tz_name):
+        """Daily usage for the optional panel, or None when it isn't configured or
+        can't be read (a missing panel must never stop the rest of the display)."""
+        token = device_config.load_env_key(USAGE_TOKEN_KEY)
+        if not token:
+            return None
+        bucket = (settings.get("usageBucket") or "").strip() or DEFAULT_USAGE_BUCKET
+        try:
+            return _InfluxStore(url, org, token, raw_bucket, bucket, verify_ssl).get_daily_usage(USAGE_DAYS, tz_name)
+        except InfluxQueryError as e:
+            logger.warning(f"Internet usage panel skipped: {e}")
+            return None
 
     @staticmethod
     def _parse_speed_max(settings):
@@ -476,21 +530,25 @@ class NetworkMonitor(BasePlugin):
             updated_str = f"Updated {updated_dt.strftime('%I:%M:%S %p').lstrip('0')}"
             draw.text((badge_left - pad, title_height / 2), updated_str, font=fonts["small"], fill=COLOR_BLACK, anchor="rm")
 
-    def _draw_left_column(self, draw, box, now_ts, tz, fonts, min_outage_seconds, time_format, speed_max_mbps, tests):
-        """Monthly speed table with the latest reading (top), hourly line quality
-        (middle) and the 12-hour ping sparkline (bottom)."""
+    def _draw_left_column(self, draw, box, now_ts, tz, fonts, min_outage_seconds, time_format, speed_max_mbps, tests, usage=None):
+        """Monthly speed table with the latest reading (top), hourly line quality,
+        the daily internet usage (when configured) and the 12-hour ping sparkline (bottom)."""
         x0, y0, x1, y1 = box
         gap = round((y1 - y0) * 0.03)
         # The quality panel is the busiest (title, notes and three charts), the ping line the simplest.
-        weights = (1.0, 1.15, 0.85)
-        unit = (y1 - y0 - 2 * gap) / sum(weights)
-        stats_box, quality_box, ping_box = [], [], []
+        weights = (1.0, 1.15, 0.85) if usage is None else (0.95, 1.05, 0.9, 0.7)
+        unit = (y1 - y0 - (len(weights) - 1) * gap) / sum(weights)
+        boxes = []
         top = y0
-        for target, weight in zip((stats_box, quality_box, ping_box), weights):
-            target.extend((x0, top, x1, top + unit * weight))
+        for weight in weights:
+            boxes.append((x0, top, x1, top + unit * weight))
             top += unit * weight + gap
+        stats_box, quality_box = boxes[0], boxes[1]
+        ping_box = boxes[-1]
         self._draw_stats_table(draw, stats_box, tests, tz, now_ts, fonts, speed_max_mbps, time_format)
         self._draw_quality_panel(draw, quality_box, now_ts, tz, fonts, time_format)
+        if usage is not None:
+            self._draw_usage_panel(draw, boxes[2], usage, fonts)
 
         since_ts = now_ts - 12 * 3600
         samples = self._store.get_samples(since_ts, now_ts)
@@ -562,6 +620,69 @@ class NetworkMonitor(BasePlugin):
             for frac, h_anchor, tx in ((0.0, "l", chart_left), (0.5, "m", (chart_left + cx1) / 2), (1.0, "r", cx1)):
                 draw.line([(tx, chart_bottom), (tx, chart_bottom + 3)], fill=COLOR_BLACK, width=1)
                 draw.text((tx, tick_y), tick_label(frac), font=small, fill=COLOR_BLACK, anchor=h_anchor + "a")
+
+    def _draw_usage_panel(self, draw, box, usage, fonts):
+        """Daily downloaded / uploaded gigabytes as paired bars, oldest day left."""
+        x0, y0, x1, y1 = box
+        pad = 8
+        label, small = fonts["label"], fonts["small"]
+        draw.rectangle([x0, y0, x1, y1], outline=COLOR_BLACK, width=2)
+        days = len(usage["dates"])
+        draw.text((x0 + pad, y0 + pad), f"Internet Usage (GB) - Last {days} Days", font=label, fill=COLOR_BLACK, anchor="la")
+
+        gb = lambda values: [None if v is None else v / 1e9 for v in values]
+        down, up = gb(usage["down"]), gb(usage["up"])
+        note_y = y0 + pad
+        lx = x1 - pad
+        # Legend and today's totals, right-aligned on the title row.
+        today = f"Today {down[-1] or 0:.1f} down / {up[-1] or 0:.1f} up GB"
+        draw.text((lx, note_y + label.size * 0.1), today, font=small, fill=COLOR_BLACK, anchor="ra")
+        lx -= draw.textlength(today, font=small) + 14
+        for name, color in (("Up", COLOR_GREEN), ("Down", COLOR_BLUE)):
+            lx -= draw.textlength(name, font=small)
+            draw.text((lx, note_y + label.size * 0.1), name, font=small, fill=COLOR_BLACK, anchor="la")
+            lx -= small.size + 2
+            draw.rectangle([lx, note_y + label.size * 0.1 + 1, lx + small.size - 2, note_y + label.size * 0.1 + small.size - 1],
+                           fill=color, outline=COLOR_BLACK)
+            lx -= 12
+
+        chart_top = y0 + pad * 2 + label.size + round(small.size * 0.6)
+        chart_bottom = y1 - pad - small.size - 6
+        chart_left, chart_right = x0 + pad + 44, x1 - pad
+        present = [v for v in down + up if v is not None]
+        if not present:
+            draw.text(((chart_left + chart_right) / 2, (chart_top + chart_bottom) / 2), "Collecting usage data...",
+                      font=label, fill=COLOR_BLUE, anchor="mm")
+            return
+        peak = max(present)
+        # Round the axis up to a 1/2/5 step so the gridlines read as whole numbers.
+        magnitude = 10 ** len(str(int(max(peak, 1))))
+        top_value = max(1.0, next((m * magnitude / 10 for m in (1, 2, 2.5, 5, 10) if m * magnitude / 10 >= peak), peak))
+
+        def y_of(value):
+            return chart_bottom - (value / top_value) * (chart_bottom - chart_top)
+
+        for frac in (0.25, 0.5, 0.75):
+            gy = chart_bottom - frac * (chart_bottom - chart_top)
+            draw.line([(chart_left, gy), (chart_right, gy)], fill=COLOR_BLACK, width=1)
+        draw.line([(chart_left, chart_bottom), (chart_right, chart_bottom)], fill=COLOR_BLACK, width=1)
+        draw.text((chart_left - 6, chart_top), f"{top_value:g}", font=small, fill=COLOR_BLACK, anchor="rm")
+        draw.text((chart_left - 6, chart_bottom), "0", font=small, fill=COLOR_BLACK, anchor="rm")
+
+        slot_w = (chart_right - chart_left) / days
+        for i in range(days):
+            for j, (values, color) in enumerate(((down, COLOR_BLUE), (up, COLOR_GREEN))):
+                value = values[i]
+                if not value:
+                    continue
+                bx0 = chart_left + i * slot_w + slot_w * (0.1 + 0.4 * j)
+                bx1 = bx0 + slot_w * 0.4
+                draw.rectangle([bx0, y_of(min(value, top_value)), bx1, chart_bottom], fill=color, outline=COLOR_BLACK)
+        for idx, anchor in ((0, "l"), (days // 2, "m"), (days - 1, "r")):
+            tx = chart_left + (idx + 0.5) * slot_w
+            tx = {"l": chart_left, "m": tx, "r": chart_right}[anchor]
+            draw.text((tx, chart_bottom + 4), usage["dates"][idx].strftime("%b %d").replace(" 0", " "),
+                      font=small, fill=COLOR_BLACK, anchor=anchor + "a")
 
     @staticmethod
     def _draw_mini_chart(draw, box, lines, kind, min_max, fonts, slots):

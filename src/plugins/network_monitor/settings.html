@@ -40,6 +40,12 @@
 </div>
 
 <div class="form-group nowrap">
+    <label for="usageBucket" class="form-label">Usage Bucket</label>
+    <input type="text" id="usageBucket" name="usageBucket" class="form-input" value="homeassistant">
+    <span title="Optional daily internet-usage chart. Home Assistant writes the router's cumulative download/upload byte counters (exos_router_data_received / exos_router_data_sent) to this bucket. It is only drawn when a read token for it is stored in the .env file as INFLUXDB_HA_TOKEN.">&#9432;</span>
+</div>
+
+<div class="form-group nowrap">
     <label for="speedMaxMbps" class="form-label">Speed Graph Scale</label>
     <input type="number" id="speedMaxMbps" name="speedMaxMbps" class="form-input" min="1" step="1" value="500">Mbps
     <span title="Fixed top of the speed graph's y-axis - set this to your plan's speed (e.g. 500 for a 500/500 plan). Readings above it are drawn at the top edge.">&#9432;</span>
@@ -96,6 +102,7 @@
             document.getElementById('influxOrg').value = pluginSettings.influxOrg || 'none';
             document.getElementById('rawBucket').value = pluginSettings.rawBucket || 'netmon_raw';
             document.getElementById('influxBucket').value = pluginSettings.influxBucket || 'netmon';
+            document.getElementById('usageBucket').value = pluginSettings.usageBucket || 'homeassistant';
             document.getElementById('speedMaxMbps').value = pluginSettings.speedMaxMbps || 500;
             document.getElementById('minOutageSeconds').value = pluginSettings.minOutageSeconds || 2;
             document.getElementById('weekStart').value = pluginSettings.weekStart || 'sunday';

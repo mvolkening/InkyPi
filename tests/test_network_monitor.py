@@ -123,3 +123,41 @@ class TestLineQuality:
         full, short = plugin._latest_reading((NOW, 480.0, 470.0, 12.0, None, 25.0, 40.0), pytz.UTC, "12h")
         assert "Under load 25/40 ms" in full and "Under load" not in short
         assert plugin._latest_reading(None, pytz.UTC, "12h") == ["Latest: no speed tests yet"]
+
+
+class TestDailyUsage:
+    def _store_with_rows(self, rows):
+        store = _InfluxStore("http://x", "org", "tok", "raw", "homeassistant", True)
+        store._query = lambda flux: rows
+        return store
+
+    def test_rows_become_per_day_totals_with_gaps(self):
+        from datetime import datetime
+        import pytz
+        today = datetime.now(pytz.UTC).date()
+        # aggregateWindow stamps a day with its end: midnight after the day it covers.
+        stamp = lambda d: f"{d.isoformat()}T00:00:00Z"
+        from datetime import timedelta
+        rows = [
+            {"_time": stamp(today), "_value": "3000000000", "entity_id": "exos_router_data_received"},
+            {"_time": stamp(today), "_value": "500000000", "entity_id": "exos_router_data_sent"},
+            {"_time": stamp(today - timedelta(days=1)), "_value": "", "entity_id": "exos_router_data_received"},
+        ]
+        usage = self._store_with_rows(rows).get_daily_usage(3, "UTC")
+        assert len(usage["dates"]) == 3 and usage["dates"][-1] == today
+        assert usage["down"][-2] == 3e9 and usage["up"][-2] == 5e8
+        assert usage["down"][-1] is None and usage["down"][0] is None
+
+    def test_usage_panel_renders_with_and_without_data(self):
+        from datetime import date, timedelta
+        from PIL import Image, ImageDraw
+        from plugins.network_monitor.network_monitor import get_font
+        fonts = {k: get_font("Jost", s, w) for k, s, w in (("label", 20, "bold"), ("small", 14, "normal"))}
+        plugin = NetworkMonitor({"id": "network_monitor"})
+        dates = [date(2026, 11, 1) + timedelta(days=i) for i in range(14)]
+        filled = {"dates": dates, "down": [(i + 1) * 2e9 for i in range(14)], "up": [i * 2e8 for i in range(14)]}
+        empty = {"dates": dates, "down": [None] * 14, "up": [None] * 14}
+        for usage in (filled, empty):
+            image = Image.new("RGB", (700, 220), "white")
+            plugin._draw_usage_panel(ImageDraw.Draw(image), (0, 0, 700, 220), usage, fonts)
+            assert image.getbbox() is not None
