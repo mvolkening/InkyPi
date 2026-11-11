@@ -61,13 +61,7 @@ class TestSpeedCharts:
         assert rows[1][1:] == (None, None, None, None, None, 0)
         assert rows[2][5] is None  # no idle latency recorded
 
-    def test_aggregate(self):
-        assert NetworkMonitor._aggregate([], "average") is None
-        assert NetworkMonitor._aggregate([1, 3], "average") == 2
-        assert NetworkMonitor._aggregate([1, 3], "max") == 3
-        assert NetworkMonitor._aggregate([1, 3], "min") == 1
-
-    def test_speed_charts_render(self):
+    def test_stats_table_renders(self):
         import pytz
         from PIL import Image, ImageDraw
         from plugins.network_monitor.network_monitor import get_font
@@ -77,8 +71,6 @@ class TestSpeedCharts:
         draw = ImageDraw.Draw(image)
         fonts = {k: get_font("Jost", s, w) for k, s, w in (("label", 10, "bold"), ("small", 7, "normal"))}
         plugin = NetworkMonitor({"id": "network_monitor"})
-        plugin._draw_hourly_speed(draw, (0, 0, 260, 200), tests, tz, fonts, 2, "average", 500)
-        plugin._draw_weekday_speed(draw, (0, 200, 260, 400), tests, tz, fonts, 2, "monday", "average", 500)
         plugin._draw_stats_table(draw, (260, 0, 800, 150), tests, tz, NOW, fonts, 500)
         assert image.getbbox() is not None
 
@@ -161,3 +153,57 @@ class TestDailyUsage:
             image = Image.new("RGB", (700, 220), "white")
             plugin._draw_usage_panel(ImageDraw.Draw(image), (0, 0, 700, 220), usage, fonts)
             assert image.getbbox() is not None
+
+
+class TestThroughputPanels:
+    def _fonts(self):
+        from plugins.network_monitor.network_monitor import get_font
+        return {k: get_font("Jost", s, w) for k, s, w in
+                (("label", 20, "bold"), ("small", 14, "normal"), ("big", 30, "bold"))}
+
+    def test_bucket_series_means_and_peaks(self):
+        means, peaks = NetworkMonitor._bucket_series([(0, 10.0), (60, 30.0), (1000, 5.0)], 0, 4, 900)
+        assert means == [20.0, 5.0, None, None] and peaks == [30.0, 5.0, None, None]
+
+    def test_nice_top_and_minutes(self):
+        assert NetworkMonitor._nice_top(100.7) == 200 and NetworkMonitor._nice_top(7) == 10
+        assert NetworkMonitor._fmt_minutes(45) == "45 min" and NetworkMonitor._fmt_minutes(125) == "2 h 05 min"
+
+    def test_panels_render_with_and_without_data(self):
+        from datetime import date, timedelta
+        import pytz
+        from PIL import Image, ImageDraw
+        plugin = NetworkMonitor({"id": "network_monitor"})
+        fonts = self._fonts()
+        points = [(NOW - m * 60, 20.0 + (m * 7) % 90) for m in range(0, 1440)]
+        limit = {"dates": [date(2026, 11, 1) + timedelta(days=i) for i in range(30)],
+                 "down_min": [None] * 28 + [12.0, 3.0], "up_min": [None] * 28 + [0.0, 0.0],
+                 "tiers": {50.0: 90.0, 80.0: 30.0}, "peak_down": 101.2, "peak_up": 22.0, "data_days": 2.1}
+        full = {"series": {"down": points, "up": points[::3]}, "limit": limit}
+        for traffic in (full, None):
+            image = Image.new("RGB", (520, 1100), "white")
+            draw = ImageDraw.Draw(image)
+            plugin._draw_throughput_panel(draw, (0, 0, 520, 540), traffic, NOW, pytz.UTC, fonts, "12h", 100)
+            plugin._draw_limit_panel(draw, (0, 550, 520, 1100), traffic, fonts, 100)
+            assert image.getbbox() is not None
+
+
+class TestLimitStats:
+    def test_daily_flags_become_minutes_per_day(self):
+        from datetime import datetime
+        import pytz
+        today = datetime.now(pytz.UTC).date()
+        store = _InfluxStore("http://x", "org", "tok", "raw", "homeassistant", True)
+        stamp = lambda d: f"{d.isoformat()}T00:00:00Z"
+        replies = iter([
+            [{"_time": stamp(today), "_value": "12", "entity_id": "exos_router_data_received"}],
+            [{"_value": "40"}], [{"_value": "20"}],
+            [{"_value": "101.5", "entity_id": "exos_router_data_received"},
+             {"_value": "9", "entity_id": "exos_router_data_sent"}],
+            [{"_time": "2026-11-09T13:49:50Z"}],
+        ])
+        store._query = lambda flux: next(replies)
+        stats = store.get_limit_stats(3, "UTC", 100)
+        assert stats["down_min"][-2] == 12.0 and stats["down_min"][-1] is None
+        assert stats["tiers"] == {50.0: 40.0, 80.0: 20.0}
+        assert stats["peak_down"] == 101.5 and stats["peak_up"] == 9.0 and stats["data_days"] > 0

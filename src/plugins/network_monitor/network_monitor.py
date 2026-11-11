@@ -32,6 +32,11 @@ USAGE_DAYS = 14
 QUALITY_WINDOW_HOURS = 24
 # Speed tests fetched for the monthly table (6 calendar months) and the hour/weekday charts.
 MONTHLY_HISTORY_DAYS = 190
+# Actual-throughput chart window, and the period over which time above the plan limit is counted.
+THROUGHPUT_HOURS = 24
+LIMIT_DAYS = 30
+# The next-cheaper ISP package; override per instance with `limitMbps`.
+DEFAULT_LIMIT_MBPS = 100
 # Speed graph's fixed y-axis top, matched to the subscribed plan so a glance shows
 # how close to the plan speed the link is; override per instance with `speedMaxMbps`.
 DEFAULT_SPEED_MAX_MBPS = 500
@@ -334,6 +339,85 @@ class _InfluxStore:
                 "up": [by_day["up"].get(d) for d in dates]}
 
 
+    def _rate_flux(self, range_args, direction=None):
+        """Flux building the router's throughput in Mbit/s per minute (the byte counters
+        are logged about every 30 s; a counter reset counts as zero for that minute)."""
+        entity = USAGE_ENTITY_REGEX if direction is None else f"exos_router_data_{direction}"
+        return (
+            f'from(bucket: "{_flux_escape(self.bucket)}") |> range({range_args}) '
+            f'|> filter(fn: (r) => r._field == "value" and r.entity_id =~ /^{entity}$/) '
+            '|> aggregateWindow(every: 1m, fn: last, createEmpty: false) '
+            '|> derivative(unit: 1s, nonNegative: true) '
+            '|> map(fn: (r) => ({r with _value: r._value * 8.0 / 1000000.0})) '
+        )
+
+    def get_throughput(self, since_ts, until_ts):
+        """Per-minute actual throughput over the window: {"down": [(ts, mbps)], "up": [...]}."""
+        rows = self._query(
+            self._rate_flux(f"start: {_to_rfc3339(since_ts)}, stop: {_to_rfc3339(until_ts + 1)}")
+            + '|> keep(columns: ["_time", "_value", "entity_id"])'
+        )
+        series = {"down": [], "up": []}
+        for row in rows:
+            ts, value = _parse_influx_time(row.get("_time")), _parse_float(row.get("_value"))
+            if ts is not None and value is not None:
+                series["down" if row.get("entity_id", "").endswith("received") else "up"].append((ts, value))
+        for points in series.values():
+            points.sort()
+        return series
+
+    def get_limit_stats(self, days, tz_name, limit_mbps):
+        """How often the link ran above `limit_mbps` (and at 50% / 80% of it) in the last
+        `days` days, from per-minute throughput. Returns
+        {"dates": [date], "down_min": [minutes|None], "up_min": [...],
+         "tiers": {mbps: down minutes}, "peak_down": Mbit/s, "peak_up": Mbit/s, "data_days": float|None}."""
+        zone = (f'import "timezone"\noption location = timezone.location(name: "{_flux_escape(tz_name)}")\n')
+
+        def flagged(threshold, direction=None):
+            return (self._rate_flux(f"start: -{days}d", direction)
+                    + f'|> map(fn: (r) => ({{r with _value: if r._value > {threshold:.3f} then 1.0 else 0.0}})) ')
+
+        tz = pytz.timezone(tz_name)
+        per_day = {"down": {}, "up": {}}
+        daily = self._query(zone + flagged(limit_mbps)
+                            + '|> aggregateWindow(every: 1d, fn: sum, createEmpty: true) '
+                            '|> keep(columns: ["_time", "_value", "entity_id"])')
+        for row in daily:
+            ts, value = _parse_influx_time(row.get("_time")), _parse_float(row.get("_value"))
+            if ts is None or value is None:
+                continue
+            day = datetime.fromtimestamp(ts - 3600, tz).date()  # window stamped with its end
+            key = "down" if row.get("entity_id", "").endswith("received") else "up"
+            per_day[key][day] = per_day[key].get(day, 0.0) + value
+
+        tiers = {}
+        for fraction in (0.5, 0.8):
+            rows = self._query(flagged(limit_mbps * fraction, "received")
+                               + '|> group() |> sum() |> keep(columns: ["_value"])')
+            tiers[limit_mbps * fraction] = (_parse_float(rows[0].get("_value")) if rows else None) or 0.0
+
+        peaks = {"down": 0.0, "up": 0.0}
+        for row in self._query(self._rate_flux(f"start: -{days}d")
+                               + '|> group(columns: ["entity_id"]) |> max() |> keep(columns: ["_value", "entity_id"])'):
+            value = _parse_float(row.get("_value"))
+            if value is not None:
+                peaks["down" if row.get("entity_id", "").endswith("received") else "up"] = value
+
+        first = self._query(
+            f'from(bucket: "{_flux_escape(self.bucket)}") |> range(start: -{days}d) '
+            f'|> filter(fn: (r) => r._field == "value" and r.entity_id =~ /^exos_router_data_received$/) '
+            '|> group() |> first() |> keep(columns: ["_time"])'
+        )
+        first_ts = _parse_influx_time(first[0].get("_time")) if first else None
+        today = datetime.now(tz).date()
+        dates = [today - timedelta(days=d) for d in range(days - 1, -1, -1)]
+        return {"dates": dates,
+                "down_min": [per_day["down"].get(d) for d in dates],
+                "up_min": [per_day["up"].get(d) for d in dates],
+                "tiers": tiers, "peak_down": peaks["down"], "peak_up": peaks["up"],
+                "data_days": None if first_ts is None else (time.time() - first_ts) / 86400}
+
+
 class NetworkMonitor(BasePlugin):
     def generate_settings_template(self):
         template_params = super().generate_settings_template()
@@ -376,6 +460,7 @@ class NetworkMonitor(BasePlugin):
                 "title": get_font("Jost", round(height * 0.040), "bold"),
                 "label": get_font("Jost", round(height * 0.020), "bold"),
                 "small": get_font("Jost", round(height * 0.014), "normal"),
+                "big": get_font("Jost", round(height * 0.034), "bold"),
             }
 
             if not store.has_any_data():
@@ -395,24 +480,22 @@ class NetworkMonitor(BasePlugin):
             right_top = body_top + margin
             right_bottom = height - margin
             right_height = right_bottom - right_top
-            histogram_box = (left_width + margin // 2, right_top, width - margin, right_top + round(right_height * 0.42))
-            calendar_box = (left_width + margin // 2, right_top + round(right_height * 0.42) + margin, width - margin, right_bottom)
+            speed_box = (left_width + margin // 2, right_top, width - margin, right_top + round(right_height * 0.50))
+            limit_box = (left_width + margin // 2, right_top + round(right_height * 0.50) + margin, width - margin, right_bottom)
 
             min_outage_seconds = self._parse_min_outage_seconds(settings)
-            history_weeks = self._parse_history_weeks(settings)
-            week_start = self._parse_week_start(settings)
-            aggregation = self._parse_aggregation(settings)
             speed_max = self._parse_speed_max(settings)
+            limit_mbps = self._parse_limit_mbps(settings)
 
-            # One query feeds the monthly table and both speed-pattern charts.
+            # One query feeds the monthly speed-test table.
             all_tests = store.get_speedtests(now_ts - MONTHLY_HISTORY_DAYS * 86400)
-            window_start = now_ts - history_weeks * 7 * 86400
-            recent_tests = [t for t in all_tests if t[0] >= window_start]
 
             usage = self._load_usage(settings, device_config, influx_url, influx_org, raw_bucket, verify_ssl, timezone_name)
             self._draw_left_column(draw, left_box, now_ts, tz, fonts, min_outage_seconds, time_format, speed_max, all_tests, usage)
-            self._draw_hourly_speed(draw, histogram_box, recent_tests, tz, fonts, history_weeks, aggregation, speed_max)
-            self._draw_weekday_speed(draw, calendar_box, recent_tests, tz, fonts, history_weeks, week_start, aggregation, speed_max)
+            traffic = self._load_traffic(settings, device_config, influx_url, influx_org, raw_bucket, verify_ssl,
+                                         timezone_name, now_ts, limit_mbps)
+            self._draw_throughput_panel(draw, speed_box, traffic, now_ts, tz, fonts, time_format, limit_mbps)
+            self._draw_limit_panel(draw, limit_box, traffic, fonts, limit_mbps)
         except InfluxQueryError as e:
             logger.error(f"Failed to query InfluxDB: {e}")
             raise RuntimeError("Failed to retrieve network monitor data from InfluxDB, please check logs.")
@@ -434,6 +517,30 @@ class NetworkMonitor(BasePlugin):
             return None
 
     @staticmethod
+    def _load_traffic(settings, device_config, url, org, raw_bucket, verify_ssl, tz_name, now_ts, limit_mbps):
+        """Actual throughput (last 24 h) and time-above-limit stats (last 30 days) from the
+        router byte counters, or None when unavailable (never stops the rest of the display)."""
+        token = device_config.load_env_key(USAGE_TOKEN_KEY)
+        if not token:
+            return None
+        bucket = (settings.get("usageBucket") or "").strip() or DEFAULT_USAGE_BUCKET
+        store = _InfluxStore(url, org, token, raw_bucket, bucket, verify_ssl)
+        try:
+            return {"series": store.get_throughput(now_ts - THROUGHPUT_HOURS * 3600, now_ts),
+                    "limit": store.get_limit_stats(LIMIT_DAYS, tz_name, limit_mbps)}
+        except InfluxQueryError as e:
+            logger.warning(f"Throughput panels skipped: {e}")
+            return None
+
+    @staticmethod
+    def _parse_limit_mbps(settings):
+        try:
+            value = float(settings.get("limitMbps"))
+        except (TypeError, ValueError):
+            value = DEFAULT_LIMIT_MBPS
+        return value if value > 0 else DEFAULT_LIMIT_MBPS
+
+    @staticmethod
     def _parse_speed_max(settings):
         try:
             value = float(settings.get("speedMaxMbps"))
@@ -448,23 +555,6 @@ class NetworkMonitor(BasePlugin):
         except (TypeError, ValueError):
             value = 2
         return max(0, value)
-
-    @staticmethod
-    def _parse_history_weeks(settings):
-        try:
-            value = int(settings.get("historyWeeks"))
-        except (TypeError, ValueError):
-            value = 4
-        return max(1, min(MAX_HISTORY_WEEKS, value))
-
-    @staticmethod
-    def _parse_week_start(settings):
-        return "monday" if str(settings.get("weekStart", "")).strip().lower() == "monday" else "sunday"
-
-    @staticmethod
-    def _parse_aggregation(settings):
-        value = str(settings.get("aggregation", "")).strip().lower()
-        return value if value in ("max", "min", "average") else "average"
 
     @staticmethod
     def _filter_outages(outages, min_seconds):
@@ -816,100 +906,173 @@ class NetworkMonitor(BasePlugin):
             draw.text((tick_x, tick_y), self._format_clock_time(tick_dt, time_format), font=fonts["small"], fill=COLOR_BLACK, anchor=h_anchor + "a")
 
     @staticmethod
-    def _aggregate(values, aggregation):
-        if not values:
-            return None
-        if aggregation == "max":
-            return max(values)
-        if aggregation == "min":
-            return min(values)
-        return sum(values) / len(values)
+    def _bucket_series(points, since_ts, buckets, bucket_seconds):
+        """Per-minute (ts, mbps) points -> (mean list, peak list) over `buckets` equal slots
+        starting at `since_ts`; a slot with no points is None."""
+        slots = [[] for _ in range(buckets)]
+        for ts, value in points:
+            idx = int((ts - since_ts) // bucket_seconds)
+            if 0 <= idx < buckets:
+                slots[idx].append(value)
+        means = [sum(v) / len(v) if v else None for v in slots]
+        peaks = [max(v) if v else None for v in slots]
+        return means, peaks
 
-    def _draw_speed_bars(self, draw, box, title, groups, y_max, fonts, label_every=1, value_labels=False):
-        """Paired download (blue) / upload (green) bars on the plan-speed scale.
-        `groups` is [(label, down_mbps or None, up_mbps or None)]; a group with no
-        tests is left empty rather than drawn as a zero."""
+    @staticmethod
+    def _nice_top(value):
+        """Round an axis top up to a 1/2/2.5/5/10 step so gridlines read as round numbers."""
+        value = max(value, 1.0)
+        magnitude = 10 ** (len(str(int(value))) - 1)
+        return next(m * magnitude for m in (1, 2, 2.5, 5, 10) if m * magnitude >= value)
+
+    @staticmethod
+    def _dashed_hline(draw, x0, x1, y, color, dash=6, gap=5):
+        x = x0
+        while x < x1:
+            draw.line([(x, y), (min(x + dash, x1), y)], fill=color, width=2)
+            x += dash + gap
+
+    @staticmethod
+    def _fmt_minutes(minutes):
+        minutes = int(round(minutes or 0))
+        if minutes >= 120:
+            return f"{minutes // 60} h {minutes % 60:02d} min"
+        return f"{minutes} min"
+
+    def _draw_throughput_panel(self, draw, box, traffic, now_ts, tz, fonts, time_format, limit_mbps):
+        """Actual download and upload speed over the last THROUGHPUT_HOURS: bars are 15-minute
+        averages, the black ticks the fastest single minute inside each slot."""
         x0, y0, x1, y1 = box
         pad = 10
+        label, small = fonts["label"], fonts["small"]
         draw.rectangle([x0, y0, x1, y1], outline=COLOR_BLACK, width=2)
-        draw.text((x0 + pad, y0 + pad), title, font=fonts["label"], fill=COLOR_BLACK, anchor="la")
+        draw.text((x0 + pad, y0 + pad), f"Actual Speed - Last {THROUGHPUT_HOURS} Hours (Mbit/s)",
+                  font=label, fill=COLOR_BLACK, anchor="la")
+        if traffic is None or not (traffic["series"]["down"] or traffic["series"]["up"]):
+            draw.text(((x0 + x1) / 2, (y0 + y1) / 2), "Collecting speed data...", font=label, fill=COLOR_BLUE, anchor="mm")
+            return
 
-        small = fonts["small"]
-        chart_top = y0 + fonts["label"].size + pad * 3
-        chart_bottom = y1 - pad - small.size - 6
-        chart_left = x0 + pad + 26
-        chart_right = x1 - pad
+        bucket_s = 900
+        buckets = THROUGHPUT_HOURS * 3600 // bucket_s
+        since_ts = now_ts - THROUGHPUT_HOURS * 3600
+        chart_left, chart_right = x0 + pad + 40, x1 - pad
+        body_top = y0 + pad * 2 + label.size
+        tick_room = small.size + 12
+        sub_h = (y1 - pad - tick_room - body_top) / 2
+        for n, (key, name, color) in enumerate((("down", "Download", COLOR_BLUE), ("up", "Upload", COLOR_GREEN))):
+            top = body_top + n * sub_h
+            means, peaks = self._bucket_series(traffic["series"][key], since_ts, buckets, bucket_s)
+            present = [v for v in means if v is not None]
+            peak = max([p for p in peaks if p is not None], default=0.0)
+            note = f"avg {sum(present) / len(present):.1f}, peak {peak:.0f}" if present else "no data"
+            draw.text((chart_left, top), name, font=small, fill=COLOR_BLACK, anchor="la")
+            draw.text((chart_right, top), note, font=small, fill=COLOR_BLACK, anchor="ra")
+            c_top, c_bottom = top + small.size + 8, top + sub_h - 10
+            # Scaled to the data; the limit line appears once traffic gets near it.
+            top_value = self._nice_top(max(peak, 10.0))
 
-        group_w = (chart_right - chart_left) / len(groups)
-        bar_w = max(1.0, group_w * 0.4)
-        height = chart_bottom - chart_top
+            def y_of(value, c_top=c_top, c_bottom=c_bottom, top_value=top_value):
+                return c_bottom - (min(value, top_value) / top_value) * (c_bottom - c_top)
 
-        for frac in (0.5, 1.0):
-            gy = chart_bottom - frac * height
-            draw.line([(chart_left, gy), (chart_right, gy)], fill=COLOR_BLACK, width=1)
-        draw.line([(chart_left, chart_bottom), (chart_right, chart_bottom)], fill=COLOR_BLACK, width=1)
-        draw.text((x0 + pad, chart_top), f"{int(y_max)}", font=small, fill=COLOR_BLACK, anchor="lm")
-        draw.text((x0 + pad, chart_top + height / 2), f"{int(y_max / 2)}", font=small, fill=COLOR_BLACK, anchor="lm")
-        draw.text((x0 + pad, chart_bottom), "0", font=small, fill=COLOR_BLACK, anchor="lm")
-
-        for idx, (label, down, up) in enumerate(groups):
-            gx = chart_left + idx * group_w
-            bx = gx + (group_w - 2 * bar_w) / 2
-            for offset, value, color in ((0, down, COLOR_BLUE), (1, up, COLOR_GREEN)):
-                if value is None:
+            for frac in (0.5, 1.0):
+                gy = c_bottom - frac * (c_bottom - c_top)
+                draw.line([(chart_left, gy), (chart_right, gy)], fill=COLOR_BLACK, width=1)
+            draw.text((chart_left - 6, c_top), f"{top_value:g}", font=small, fill=COLOR_BLACK, anchor="rm")
+            draw.text((chart_left - 6, c_bottom), "0", font=small, fill=COLOR_BLACK, anchor="rm")
+            slot_w = (chart_right - chart_left) / buckets
+            for i, (mean, slot_peak) in enumerate(zip(means, peaks)):
+                if mean is None:
                     continue
-                top = chart_bottom - (min(value, y_max) / y_max) * height
-                left = bx + offset * bar_w
-                draw.rectangle([left, top, left + bar_w, chart_bottom], fill=color)
-            if value_labels and down is not None:
-                label = f"{label} {down:.0f}"
-            if idx % label_every == 0:
-                if label_every == 1:
-                    draw.text((gx + group_w / 2, chart_bottom + 4), label, font=small, fill=COLOR_BLACK, anchor="ma")
-                else:
-                    draw.text((gx, chart_bottom + 4), label, font=small, fill=COLOR_BLACK, anchor="la")
+                bx0 = chart_left + i * slot_w
+                bx1 = bx0 + max(1.0, slot_w - 1)
+                if y_of(mean) < c_bottom - 0.5:
+                    draw.rectangle([bx0, y_of(mean), bx1, c_bottom], fill=color)
+                draw.line([(bx0, y_of(slot_peak)), (bx1, y_of(slot_peak))], fill=COLOR_BLACK, width=2)
+            if limit_mbps <= top_value:
+                ly = y_of(limit_mbps)
+                self._dashed_hline(draw, chart_left, chart_right, ly, COLOR_RED)
+                draw.text((chart_left - 6, ly), f"{limit_mbps:g}", font=small, fill=COLOR_RED, anchor="rm")
+            draw.line([(chart_left, c_bottom), (chart_right, c_bottom)], fill=COLOR_BLACK, width=1)
+            draw.line([(chart_left, c_top), (chart_left, c_bottom)], fill=COLOR_BLACK, width=1)
 
-        # legend, right-aligned on the title row
-        swatch = small.size
-        lx = x1 - pad
-        for name, color in (("Up", COLOR_GREEN), ("Down", COLOR_BLUE)):
-            lx -= draw.textlength(name, font=small)
-            draw.text((lx, y0 + pad), name, font=small, fill=COLOR_BLACK, anchor="la")
-            lx -= swatch + 4
-            draw.rectangle([lx, y0 + pad, lx + swatch, y0 + pad + swatch], fill=color, outline=COLOR_BLACK)
-            lx -= 10
+        axis_y = body_top + 2 * sub_h - 10
+        # Ticks on round local hours (every 6 h) so the labels never crowd each other.
+        tick_ts = (since_ts // 3600 + 1) * 3600
+        while tick_ts <= now_ts:
+            tick_dt = datetime.fromtimestamp(tick_ts, tz)
+            if tick_dt.hour % 6 == 0:
+                tx = chart_left + (tick_ts - since_ts) / (THROUGHPUT_HOURS * 3600) * (chart_right - chart_left)
+                draw.line([(tx, axis_y), (tx, axis_y + 3)], fill=COLOR_BLACK, width=1)
+                text = f"{tick_dt.hour:02d}:00" if time_format == "24h" else tick_dt.strftime("%I %p").lstrip("0")
+                draw.text((tx, axis_y + 5), text, font=small, fill=COLOR_BLACK, anchor="ma")
+            tick_ts += 3600
 
-    def _draw_hourly_speed(self, draw, box, tests, tz, fonts, history_weeks, aggregation, y_max):
-        """Speed by hour of day, aggregated over that hour on every day in the window."""
-        slots = [([], []) for _ in range(24)]
-        for ts, down, up, *_rest in tests:
-            hour = datetime.fromtimestamp(ts, tz).hour
-            slots[hour][0].append(down)
-            slots[hour][1].append(up)
-        groups = [
-            (f"{hour:02d}", self._aggregate(downs, aggregation), self._aggregate(ups, aggregation))
-            for hour, (downs, ups) in enumerate(slots)
+    def _draw_limit_panel(self, draw, box, traffic, fonts, limit_mbps):
+        """How much of the last LIMIT_DAYS the link ran above `limit_mbps` (the next ISP
+        package down), as totals and minutes per day."""
+        x0, y0, x1, y1 = box
+        pad = 10
+        label, small = fonts["label"], fonts["small"]
+        big = fonts.get("big", label)
+        draw.rectangle([x0, y0, x1, y1], outline=COLOR_BLACK, width=2)
+        draw.text((x0 + pad, y0 + pad), f"Time Above {limit_mbps:g} Mbit/s - Last {LIMIT_DAYS} Days",
+                  font=label, fill=COLOR_BLACK, anchor="la")
+        stats = traffic["limit"] if traffic else None
+        if stats is None:
+            draw.text(((x0 + x1) / 2, (y0 + y1) / 2), "Collecting speed data...", font=label, fill=COLOR_BLUE, anchor="mm")
+            return
+
+        down, up = stats["down_min"], stats["up_min"]
+        down_total, up_total = sum(v or 0 for v in down), sum(v or 0 for v in up)
+        data_days = stats["data_days"] or 0
+        span_min = max(1.0, min(data_days, LIMIT_DAYS) * 1440)
+        days_hit = sum(1 for v in down if v and v >= 1)
+        days_seen = max(1, min(LIMIT_DAYS, int(data_days) + 1))
+
+        y = y0 + pad * 2 + label.size + 4
+        headline = self._fmt_minutes(down_total)
+        draw.text((x0 + pad, y), headline, font=big, fill=COLOR_RED if down_total else COLOR_GREEN, anchor="la")
+        headline_w = draw.textlength(headline, font=big)
+        draw.text((x0 + pad + headline_w + 12, y + big.size * 0.55),
+                  f"download = {100.0 * down_total / span_min:.2f}% of the time", font=small, fill=COLOR_BLACK, anchor="lm")
+        y += big.size + 10
+        lines = [
+            f"Upload above {limit_mbps:g}: {self._fmt_minutes(up_total)}   |   Days hit: {days_hit} of {days_seen}",
+            "   |   ".join(f"Above {mbps:g}: {self._fmt_minutes(mins)}" for mbps, mins in sorted(stats["tiers"].items())),
+            f"Fastest minute: {stats['peak_down']:.0f} down / {stats['peak_up']:.0f} up Mbit/s   |   {data_days:.1f} days of data",
         ]
-        agg_label = {"max": "Max", "min": "Min", "average": "Avg"}[aggregation]
-        title = f"Speed By Hour ({agg_label}, {history_weeks} Wk)"
-        self._draw_speed_bars(draw, box, title, groups, y_max, fonts, label_every=6)
+        for line in lines:
+            while draw.textlength(line, font=small) > x1 - x0 - 2 * pad and "   |   " in line:
+                line = line.rsplit("   |   ", 1)[0]
+            draw.text((x0 + pad, y), line, font=small, fill=COLOR_BLACK, anchor="la")
+            y += small.size + 5
 
-    def _draw_weekday_speed(self, draw, box, tests, tz, fonts, history_weeks, week_start, aggregation, y_max):
-        """Speed by weekday, aggregated over every test on that weekday in the window."""
-        slots = [([], []) for _ in range(7)]
-        for ts, down, up, *_rest in tests:
-            weekday = datetime.fromtimestamp(ts, tz).weekday()
-            slots[weekday][0].append(down)
-            slots[weekday][1].append(up)
-        names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-        order = list(range(7)) if week_start == "monday" else [6, 0, 1, 2, 3, 4, 5]
-        groups = [
-            (names[d], self._aggregate(slots[d][0], aggregation), self._aggregate(slots[d][1], aggregation))
-            for d in order
-        ]
-        agg_label = {"max": "Max", "min": "Min", "average": "Avg"}[aggregation]
-        title = f"Speed By Weekday ({agg_label}, {history_weeks} Wk)"
-        self._draw_speed_bars(draw, box, title, groups, y_max, fonts, value_labels=True)
+        # Minutes per day above the limit (download blue, upload green).
+        c_top, c_bottom = y + small.size + 8, y1 - pad - small.size - 10
+        chart_left, chart_right = x0 + pad + 40, x1 - pad
+        draw.text((chart_left, y), "Minutes per day above the limit", font=small, fill=COLOR_BLACK, anchor="la")
+        top_value = self._nice_top(max([v for v in down + up if v is not None] + [10.0]))
+        days = len(stats["dates"])
+        slot_w = (chart_right - chart_left) / days
+        for frac in (0.5, 1.0):
+            gy = c_bottom - frac * (c_bottom - c_top)
+            draw.line([(chart_left, gy), (chart_right, gy)], fill=COLOR_BLACK, width=1)
+        draw.text((chart_left - 6, c_top), f"{top_value:g}", font=small, fill=COLOR_BLACK, anchor="rm")
+        draw.text((chart_left - 6, c_bottom), "0", font=small, fill=COLOR_BLACK, anchor="rm")
+        for i in range(days):
+            for j, (values, color) in enumerate(((down, COLOR_BLUE), (up, COLOR_GREEN))):
+                value = values[i]
+                if not value:
+                    continue
+                bx0 = chart_left + i * slot_w + slot_w * (0.08 + 0.42 * j)
+                top_y = c_bottom - (min(value, top_value) / top_value) * (c_bottom - c_top)
+                draw.rectangle([bx0, min(top_y, c_bottom - 2), bx0 + slot_w * 0.42, c_bottom], fill=color)
+        draw.line([(chart_left, c_bottom), (chart_right, c_bottom)], fill=COLOR_BLACK, width=1)
+        draw.line([(chart_left, c_top), (chart_left, c_bottom)], fill=COLOR_BLACK, width=1)
+        for idx, anchor in ((0, "l"), (days // 2, "m"), (days - 1, "r")):
+            tx = {"l": chart_left, "m": chart_left + (idx + 0.5) * slot_w, "r": chart_right}[anchor]
+            draw.text((tx, c_bottom + 5), stats["dates"][idx].strftime("%b %d").replace(" 0", " "),
+                      font=small, fill=COLOR_BLACK, anchor=anchor + "a")
 
     @staticmethod
     def _monthly_stats(tests, tz, now_ts, months, plan_mbps):

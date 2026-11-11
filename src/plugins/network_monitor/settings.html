@@ -57,44 +57,14 @@
     <span title="Outages shorter than this are treated as noise (e.g. a single dropped packet) and left out of the sparklines, hourly histogram, and calendar. Set to 0 to count every failed ping. The live Online/Outage status above always reflects the ping happening right now, regardless of this setting.">&#9432;</span>
 </div>
 
-<div class="form-group">
-    <span>The hourly outage histogram is laid out like a normal calendar week (fixed Sun-Sat or Mon-Sun columns,
-        not just the last 7 days) so recurring patterns - e.g. outages every Tuesday evening - are easy to spot.</span>
-</div>
-
 <div class="form-group nowrap">
-    <label for="weekStart" class="form-label">Week Starts On</label>
-    <select id="weekStart" name="weekStart" class="form-input">
-        <option value="sunday">Sunday</option>
-        <option value="monday">Monday</option>
-    </select>
-</div>
-
-<div class="form-group nowrap">
-    <label for="historyWeeks" class="form-label">Histogram History</label>
-    <input type="number" id="historyWeeks" name="historyWeeks" class="form-input" min="1" max="12" step="1" value="4">week(s)
-    <span title="How many weeks of history feed the histogram. With more than 1 week, each weekday/hour bar aggregates that many observations - pick how below.">&#9432;</span>
-</div>
-
-<div class="form-group nowrap" id="aggregationRow">
-    <label for="aggregation" class="form-label">Aggregate Using</label>
-    <select id="aggregation" name="aggregation" class="form-input">
-        <option value="average">Average</option>
-        <option value="max">Max</option>
-        <option value="min">Min</option>
-    </select>
+    <label for="limitMbps" class="form-label">Speed Limit To Compare</label>
+    <input type="number" id="limitMbps" name="limitMbps" class="form-input" min="1" step="1" value="100">Mbit/s
+    <span title="The right-hand panels show the actual speed over the last 24 hours and how many minutes in the last 30 days the link ran above this speed (e.g. the next-cheaper ISP package). Needs the Usage Bucket and INFLUXDB_HA_TOKEN.">&#9432;</span>
 </div>
 
 <script>
     document.addEventListener('DOMContentLoaded', () => {
-        const historyWeeksInput = document.getElementById('historyWeeks');
-        const aggregationRow = document.getElementById('aggregationRow');
-
-        function updateAggregationVisibility() {
-            aggregationRow.style.display = (parseInt(historyWeeksInput.value, 10) || 1) > 1 ? '' : 'none';
-        }
-        historyWeeksInput.addEventListener('input', updateAggregationVisibility);
-
         if (loadPluginSettings) {
             document.getElementById('title').value = pluginSettings.title || '';
 
@@ -105,10 +75,7 @@
             document.getElementById('usageBucket').value = pluginSettings.usageBucket || 'homeassistant';
             document.getElementById('speedMaxMbps').value = pluginSettings.speedMaxMbps || 500;
             document.getElementById('minOutageSeconds').value = pluginSettings.minOutageSeconds || 2;
-            document.getElementById('weekStart').value = pluginSettings.weekStart || 'sunday';
-            historyWeeksInput.value = pluginSettings.historyWeeks || 4;
-            document.getElementById('aggregation').value = pluginSettings.aggregation || 'average';
+            document.getElementById('limitMbps').value = pluginSettings.limitMbps || 100;
         }
-        updateAggregationVisibility();
     });
 </script>
