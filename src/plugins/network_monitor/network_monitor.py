@@ -95,6 +95,8 @@ def _parse_annotated_csv(text):
 def _parse_influx_time(value):
     if not value:
         return None
+    # InfluxDB can stamp nanoseconds (e.g. a window clipped at the query end); strptime takes 6 digits at most.
+    value = re.sub(r"(\.\d{6})\d+Z$", lambda m: m.group(1) + "Z", value)
     for fmt in ("%Y-%m-%dT%H:%M:%S.%fZ", "%Y-%m-%dT%H:%M:%SZ"):
         try:
             return int(datetime.strptime(value, fmt).replace(tzinfo=pytz.UTC).timestamp())

@@ -28,6 +28,10 @@ class TestGetOutages:
         assert store.get_outages(NOW - 5000, NOW, NOW) == [(NOW - 3000, NOW - 600)]
 
 
+def test_parse_influx_time_handles_nanoseconds():
+    assert _parse_influx_time("2026-11-11T11:49:22.480996974Z") == _parse_influx_time("2026-11-11T11:49:22.480996Z")
+
+
 def test_parse_influx_time_handles_fractional_seconds():
     assert _parse_influx_time("2026-09-19T20:11:46.294Z") == _parse_influx_time("2026-09-19T20:11:46Z")
     assert _parse_influx_time("") is None
