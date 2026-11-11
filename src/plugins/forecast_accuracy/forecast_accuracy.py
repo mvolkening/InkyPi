@@ -214,7 +214,10 @@ def pick_cone_target(forecasts, reference, today, mode="auto", days_ahead=DEFAUL
 
 def cone_series(forecasts, target):
     """{model: [(lead_h, value), ...]} sorted by lead, for one target day."""
-    return {model: sorted(by_date[target].items()) for model, by_date in forecasts.items() if target in by_date}
+    # Negative leads (logged after the target day began) would plot right of the "target" edge, so drop them.
+    series = {model: sorted((lead, v) for lead, v in by_date[target].items() if lead >= 0)
+              for model, by_date in forecasts.items() if target in by_date}
+    return {model: pts for model, pts in series.items() if pts}
 
 
 def cone_band(series):
