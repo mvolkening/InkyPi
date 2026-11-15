@@ -42,6 +42,9 @@ sudo nilm --label L031 ignore           # hide one
 sudo nilm --label L031 ""               # remove a name
 ```
 
+Saw something switch? `sudo nilm --at 19:00` (or `--at "2026-11-14 19:00" --minutes 10`) lists every
+step the meter recorded around that time, with the load id and name, so the right id is easy to find.
+
 `--report` lists each recurring load with its legs, power, reactive type, typical run, runs and kWh
 per day (last 14 days) and an hour-of-day profile, plus two hints:
 

@@ -1387,6 +1387,37 @@ def report(cfg, state_path, show_all=False):
     return 0
 
 
+def show_steps_at(cfg, state_path, when, minutes):
+    """Prints every step within `minutes` of `when` ("HH:MM" today, or "YYYY-MM-DD HH:MM"),
+    with load names: for matching something you saw switch to what the meter recorded."""
+    tz = get_tz(cfg)
+    now = datetime.now(tz)
+    try:
+        if len(when) <= 5:
+            t = datetime.strptime(when, "%H:%M").replace(year=now.year, month=now.month, day=now.day, tzinfo=tz)
+        else:
+            t = datetime.strptime(when, "%Y-%m-%d %H:%M").replace(tzinfo=tz)
+    except ValueError:
+        print('Give the time as "HH:MM" (today) or "YYYY-MM-DD HH:MM".')
+        return 1
+    labels = cfg.labels()
+    engine = load_state(state_path, tz)
+    center = int(t.timestamp())
+    db = ResultStore(results_path(state_path)).db
+    rows = db.execute("SELECT ts, dir, kind, da, db, dq, load FROM event WHERE ts BETWEEN ? AND ? ORDER BY ts",
+                      (center - minutes * 60, center + minutes * 60)).fetchall()
+    print(f"Steps within {minutes} min of {t:%a %Y-%m-%d %H:%M}"
+          f" (processed up to {engine.local(engine.last_ts or 0):%H:%M:%S}):")
+    for ts, d, kind, da, db_, dq, load in rows:
+        name = labels.get(load, "") if load else ""
+        size = f"A {da:+.0f} W" if kind == "A" else f"B {db_:+.0f} W" if kind == "B" else f"A {da:+.0f} / B {db_:+.0f} W"
+        motor = "  motor" if d == "on" and dq > 0.4 * abs(da + db_) else ""
+        print(f"  {engine.local(ts):%H:%M:%S}  {d:3}  {size:22} {dq:+6.0f} var{motor:7}  {load or '-':5} {name}")
+    if not rows:
+        print("  (none)")
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--config", default=os.environ.get("NILM_CONFIG", DEFAULT_CONFIG_PATH))
@@ -1396,6 +1427,8 @@ def main():
     parser.add_argument("--label", nargs=2, metavar=("ID", "NAME"), help='name a load (NAME "" removes the name)')
     parser.add_argument("--rebuild", action="store_true", help="delete stored results and re-learn from history")
     parser.add_argument("--since", help="with --rebuild: start date YYYY-MM-DD (default: backfill_days ago)")
+    parser.add_argument("--at", metavar="TIME", help='list the steps around "HH:MM" (today) or "YYYY-MM-DD HH:MM"')
+    parser.add_argument("--minutes", type=int, default=5, help="with --at: how far either side (default 5)")
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO, format="%(levelname)s %(message)s")
@@ -1404,6 +1437,8 @@ def main():
         print(f"{args.label[0].upper()} = {args.label[1].strip() or '(name removed)'}  (the service picks it up within a minute)")
         return 0
     cfg = Config(args.config)
+    if args.at:
+        return show_steps_at(cfg, args.state, args.at, args.minutes)
     if args.report:
         return report(cfg, args.state, args.all)
     if args.rebuild:
