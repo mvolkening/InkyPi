@@ -612,6 +612,7 @@ PAIR_ABS_TOL_W = 30.0
 PAIR_REL_TOL = 0.12
 MAX_ON_SECONDS = 12 * 3600
 SINGLE_INSTANCE_W = 100.0  # loads at least this big can't be switched on twice at once
+RECENT_STARTS_S = 48 * 3600  # start times kept per load, for "runs today / overnight"
 DUR_BINS = 24              # log2 duration histogram: bin k holds durations in [2^k, 2^(k+1)) s
 
 
@@ -753,6 +754,9 @@ class LoadBook:
             load["last_day"] = day
         hist[min(DUR_BINS - 1, int(math.log2(max(1, cycle.duration))))] += 1
         load["hours"][local_dt.hour] += 1
+        recent = [t for t in load.get("recent", []) if t > cycle.start - RECENT_STARTS_S]
+        recent.append(cycle.start)
+        load["recent"] = recent
         daily = load["daily"].setdefault(day, [0, 0.0])
         daily[0] += 1
         if not cycle.suspect:
@@ -877,7 +881,8 @@ def ha_transitions(influx, since_ts):
         '|> filter(fn: (r) => r._measurement == "switch" or r._measurement == "light" '
         'or r._measurement == "binary_sensor__door" or r._measurement == "sensor__power" or r._measurement == "sensor__enum") '
         '|> filter(fn: (r) => r._field == "value" or r._field == "state") '
-        '|> keep(columns: ["_time", "_value", "_measurement", "entity_id"])'
+        # HA writes numbers and text states as different field types; one type for all.
+        '|> toString() |> keep(columns: ["_time", "_value", "_measurement", "entity_id"])'
     )
     series = {}
     for r in rows:
@@ -1095,6 +1100,17 @@ def publish_groups(engine, cfg):
     return groups
 
 
+def runs_summary(engine, loads):
+    """Starts today, starts between midnight and 6 am (last night, or so far tonight),
+    and the last start (ISO time) for a group of loads."""
+    starts = sorted(t for l in loads for t in l.get("recent", []))
+    now = engine.local(engine.last_ts or time.time())
+    midnight = now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+    return {"today": sum(1 for t in starts if t >= midnight),
+            "overnight": sum(1 for t in starts if midnight <= t < midnight + 6 * 3600),
+            "last": engine.local(starts[-1]).isoformat() if starts else None}
+
+
 def build_messages(engine, cfg):
     prefix = cfg.get("mqtt", "discovery_prefix").strip() or "homeassistant"
     groups = publish_groups(engine, cfg)
@@ -1111,6 +1127,7 @@ def build_messages(engine, cfg):
             "unit_of_measurement": unit, "device_class": device_class, "state_class": state_class,
             "expire_after": 900, "device": device,
         }
+        config = {k: v for k, v in config.items() if v is not None}
         if attrs:
             config["json_attributes_topic"] = f"nilm/{key}/attributes"
         messages.append((topic, json.dumps(config), True))
@@ -1124,6 +1141,8 @@ def build_messages(engine, cfg):
                   "model": "Detected load " + ", ".join(sorted(group["ids"]))}
         sensor(key, f"{key}_power", "Power", device, "W", "power", "measurement", "{{ value_json.power }}", attrs=True)
         sensor(key, f"{key}_energy", "Energy", device, "kWh", "energy", "total_increasing", "{{ value_json.energy }}")
+        sensor(key, f"{key}_runs_today", "Runs today", device, "runs", None, "total_increasing", "{{ value_json.runs_today }}")
+        sensor(key, f"{key}_last_run", "Last run", device, None, "timestamp", None, "{{ value_json.last_run }}")
         power = sum(live.get(l["id"], 0.0) for l in loads)
         identified += power
         stats = [recent_stats(l, today) for l in loads]
@@ -1139,8 +1158,11 @@ def build_messages(engine, cfg):
             "looks_like": guess(main, stats[0][0]) or "",
             "ha_match": "; ".join(describe_match(engine.hints[l["id"]]) for l in loads if l["id"] in engine.hints),
         }
+        runs = runs_summary(engine, loads)
+        attrs.update(runs_overnight=runs["overnight"])
         messages.append((f"nilm/{key}/state", json.dumps({"power": round(power, 1),
-                                                          "energy": round(sum(l["wh"] for l in loads) / 1000, 3)}), False))
+                                                          "energy": round(sum(l["wh"] for l in loads) / 1000, 3),
+                                                          "runs_today": runs["today"], "last_run": runs["last"]}), False))
         messages.append((f"nilm/{key}/attributes", json.dumps(attrs), True))
 
     # Summary: what the named/recurring loads add up to, the always-on floor, and the rest.
