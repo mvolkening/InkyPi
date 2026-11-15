@@ -1181,6 +1181,8 @@ def build_messages(engine, cfg):
         for topic in topics:
             if topic not in published.get(old_key, []):
                 messages.append((topic, "", True))
+        if old_key not in published:
+            messages.append((f"nilm/{old_key}/attributes", "", True))  # retained, so clear it too
     return messages, published
 
 
