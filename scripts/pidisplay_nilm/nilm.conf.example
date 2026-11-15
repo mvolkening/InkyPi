@@ -1,0 +1,39 @@
+# /etc/nilm/nilm.conf
+# Re-read every poll, so new labels apply within a minute without a restart.
+
+[influx]
+url = http://localhost:8086
+org = none
+# A read-only token for source_bucket and ha_bucket (results are kept locally in /var/lib/nilm/nilm.db).
+token = REPLACE_ME
+# Node-RED's whole-house meter readings.
+source_bucket = PowerMeter
+# Home Assistant's history, used to suggest names (switches, plugs, door sensors).
+ha_bucket = homeassistant
+
+[mqtt]
+# Publishes each load to Home Assistant through MQTT discovery.
+enabled = true
+host = localhost
+port = 1883
+username =
+password =
+discovery_prefix = homeassistant
+
+[nilm]
+timezone = America/Toronto
+poll_seconds = 60
+lag_seconds = 10
+# On first start, learn from this much stored history.
+backfill_days = 120
+# A load gets its own Home Assistant device once it has this many cycles on this many days
+# (named loads are always published).
+min_cycles = 10
+min_days = 2
+publish_max = 40
+
+[labels]
+# load id = name. Find the ids with:  sudo nilm --report
+# Several ids with the same name are added up (e.g. a range's elements, or a water
+# heater's upper and lower element). The name "ignore" hides a load.
+# L002 = Hot water tank

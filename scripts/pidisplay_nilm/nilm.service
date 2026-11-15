@@ -1,0 +1,21 @@
+[Unit]
+Description=Appliance disaggregation from the house power meter (NILM)
+After=network-online.target influxdb.service mosquitto.service
+Wants=network-online.target
+
+[Service]
+User=nilm
+Group=nilm
+ExecStart=/usr/bin/python3 /opt/nilm/nilm.py
+Restart=always
+RestartSec=30
+StateDirectory=nilm
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
