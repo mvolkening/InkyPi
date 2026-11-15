@@ -27,8 +27,9 @@ main bucket (long retention, tiny):
     outage      time = outage start; fields: end_ts (int epoch s, 0 = still ongoing),
                 scope (str: isp | local | unknown)
     gap         time = last sample before the daemon stopped; fields: end_ts (int)
-    speedtest   fields: download_mbps, upload_mbps, idle_latency_ms, server (str);
+    speedtest   fields: download_mbps, upload_mbps, idle_latency_ms, server (str), duration_s;
                 with Ookla's CLI also download_latency_ms / upload_latency_ms (latency under load)
+    speedtest_run  a test that failed or timed out (it still used bandwidth): ok=0, duration_s
     meta        field: first_started_ts (int), written once
 
 Configuration is re-read from the config file whenever it changes, so the ping
@@ -618,12 +619,15 @@ class SpeedTester(threading.Thread):
             completed = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
         except subprocess.TimeoutExpired:
             logger.warning("Speed test timed out after %.0fs.", timeout)
+            self._record_failed_run(started)
             return None
         except OSError as e:
             logger.error("Could not run %s: %s", command[0], e)
             return None
+        duration = time.time() - started
         if completed.returncode != 0:
             logger.warning("Speed test failed (exit %d): %s", completed.returncode, completed.stderr.strip()[-300:])
+            self._record_failed_run(started)
             return None
 
         try:
@@ -638,6 +642,7 @@ class SpeedTester(threading.Thread):
                 upload_mbps = float(data["upload"]) / 1e6
         except (ValueError, KeyError, TypeError):
             logger.warning("Could not parse speed test output: %r", completed.stdout[:200])
+            self._record_failed_run(started)
             return None
 
         # Ookla's CLI also reports latency measured while the link is saturated
@@ -654,7 +659,8 @@ class SpeedTester(threading.Thread):
         server_name = ", ".join(
             p for p in (server.get("sponsor") or server.get("name"), server.get("location") or server.get("name")) if p
         )
-        fields = [f"download_mbps={download_mbps:.2f}", f"upload_mbps={upload_mbps:.2f}"]
+        # How long the test ran, so readers of the router's traffic counters can leave it out.
+        fields = [f"download_mbps={download_mbps:.2f}", f"upload_mbps={upload_mbps:.2f}", f"duration_s={duration:.1f}"]
         if idle_latency is not None:
             fields.append(f"idle_latency_ms={idle_latency:.2f}")
         for direction, value in loaded.items():
@@ -669,6 +675,13 @@ class SpeedTester(threading.Thread):
             return None
         logger.info("Speed test: %.1f Mbps down, %.1f Mbps up (%s).", download_mbps, upload_mbps, server_name or "unknown server")
         return download_mbps, upload_mbps
+
+    def _record_failed_run(self, started):
+        """A failed or timed-out test still moved data; record when and how long it ran."""
+        try:
+            self.influx.write("bucket", [f"speedtest_run ok=0i,duration_s={time.time() - started:.1f} {int(started)}"])
+        except InfluxError as e:
+            logger.warning("Could not record the failed speed test run: %s", e)
 
 
 # ---------------------------------------------------------------------------

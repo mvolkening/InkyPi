@@ -20,7 +20,9 @@ in InkyPi's `.env` as `INFLUXDB_NETMON_TOKEN`.
 ## Adjusting
 
 Edit `/etc/netmon/netmon.conf`; changes are picked up within seconds, no restart.
-The main one is `[speedtest] interval_minutes` (default 360; each test moves a few hundred MB).
+The main one is `[speedtest] interval_minutes` (default 360; on a 600 Mbit/s line each test moves
+about 1.2 GB, ~0.7 down and ~0.5 up). Each test's duration is stored (`duration_s`, failed runs as
+`speedtest_run`) so the InkyPi usage and speed panels can leave the tests' own traffic out.
 
 ```bash
 sudo nano /etc/netmon/netmon.conf

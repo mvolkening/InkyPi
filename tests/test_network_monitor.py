@@ -122,27 +122,52 @@ class TestLineQuality:
 
 
 class TestDailyUsage:
-    def _store_with_rows(self, rows):
+    def test_minute_rows_parse_into_bytes_and_seconds(self):
         store = _InfluxStore("http://x", "org", "tok", "raw", "homeassistant", True)
-        store._query = lambda flux: rows
-        return store
-
-    def test_rows_become_per_day_totals_with_gaps(self):
-        from datetime import datetime
-        import pytz
-        today = datetime.now(pytz.UTC).date()
-        # aggregateWindow stamps a day with its end: midnight after the day it covers.
-        stamp = lambda d: f"{d.isoformat()}T00:00:00Z"
-        from datetime import timedelta
-        rows = [
-            {"_time": stamp(today), "_value": "3000000000", "entity_id": "exos_router_data_received"},
-            {"_time": stamp(today), "_value": "500000000", "entity_id": "exos_router_data_sent"},
-            {"_time": stamp(today - timedelta(days=1)), "_value": "", "entity_id": "exos_router_data_received"},
+        store._query = lambda flux: [
+            {"_time": "2026-11-11T10:02:00Z", "_value": "600", "elapsed": "60", "entity_id": "exos_router_data_sent"},
+            {"_time": "2026-11-11T10:01:00Z", "_value": "3000", "elapsed": "60", "entity_id": "exos_router_data_received"},
+            {"_time": "2026-11-11T10:03:00Z", "_value": "", "elapsed": "60", "entity_id": "exos_router_data_received"},
         ]
-        usage = self._store_with_rows(rows).get_daily_usage(3, "UTC")
-        assert len(usage["dates"]) == 3 and usage["dates"][-1] == today
-        assert usage["down"][-2] == 3e9 and usage["up"][-2] == 5e8
-        assert usage["down"][-1] is None and usage["down"][0] is None
+        traffic = store.get_minute_traffic(NOW - 3600, NOW)
+        assert traffic["down"] == [(_parse_influx_time("2026-11-11T10:01:00Z"), 3000.0, 60.0)]
+        assert len(traffic["up"]) == 1
+
+    def test_counter_wrap_is_counted_not_dropped(self):
+        from plugins.network_monitor.network_monitor import _COUNTER_DIFF_FLUX, COUNTER_WRAP
+        assert str(COUNTER_WRAP) in _COUNTER_DIFF_FLUX and "nonNegative" not in _COUNTER_DIFF_FLUX
+
+    def test_minutes_become_per_day_totals_with_gaps(self):
+        import pytz
+        from datetime import datetime
+        from plugins.network_monitor.network_monitor import summarize_usage
+        now = int(datetime(2026, 11, 11, 15, tzinfo=pytz.UTC).timestamp())
+        midnight = int(datetime(2026, 11, 11, tzinfo=pytz.UTC).timestamp())
+        traffic = {"down": [(midnight, 1e9, 60), (midnight + 60, 2e9, 60)],  # first minute ends at midnight: yesterday
+                   "up": [(midnight + 600, 5e8, 60)]}
+        usage = summarize_usage(traffic, 3, pytz.UTC, now)
+        assert len(usage["dates"]) == 3 and usage["dates"][-1] == datetime(2026, 11, 11).date()
+        assert usage["down"] == [None, 1e9, 2e9] and usage["up"] == [None, None, 5e8]
+
+    def test_speed_test_windows_are_left_out(self):
+        from plugins.network_monitor.network_monitor import _drop_windows
+        points = [(t, 1.0, 60) for t in (100, 160, 220, 280, 340)]
+        assert [p[0] for p in _drop_windows(points, [(100, 220), (330, 400)])] == [100, 280]
+        assert _drop_windows(points, []) == points
+
+    def test_speedtest_windows_use_recorded_duration(self):
+        from plugins.network_monitor.network_monitor import SPEEDTEST_DEFAULT_SECONDS, SPEEDTEST_TAIL_SECONDS
+        store = _InfluxStore("http://x", "org", "tok", "raw", "netmon", True)
+        replies = {"speedtest": [{"_time": "2026-11-11T10:00:00Z", "duration_s": "30.4"},
+                                 {"_time": "2026-11-11T04:00:00Z"}],
+                   "speedtest_run": [{"_time": "2026-11-11T16:00:00Z", "duration_s": "180"}]}
+        store._pivoted = lambda measurement, start: replies[measurement]
+        t = lambda s: _parse_influx_time(s)
+        assert store.get_speedtest_windows(NOW) == [
+            (t("2026-11-11T04:00:00Z"), t("2026-11-11T04:00:00Z") + SPEEDTEST_DEFAULT_SECONDS + SPEEDTEST_TAIL_SECONDS),
+            (t("2026-11-11T10:00:00Z"), t("2026-11-11T10:00:00Z") + 30 + SPEEDTEST_TAIL_SECONDS),
+            (t("2026-11-11T16:00:00Z"), t("2026-11-11T16:00:00Z") + 180 + SPEEDTEST_TAIL_SECONDS),
+        ]
 
     def test_usage_panel_renders_with_and_without_data(self):
         from datetime import date, timedelta
@@ -193,21 +218,17 @@ class TestThroughputPanels:
 
 
 class TestLimitStats:
-    def test_daily_flags_become_minutes_per_day(self):
-        from datetime import datetime
+    def test_minutes_above_limit_tiers_and_peaks(self):
         import pytz
-        today = datetime.now(pytz.UTC).date()
-        store = _InfluxStore("http://x", "org", "tok", "raw", "homeassistant", True)
-        stamp = lambda d: f"{d.isoformat()}T00:00:00Z"
-        replies = iter([
-            [{"_time": stamp(today), "_value": "12", "entity_id": "exos_router_data_received"}],
-            [{"_value": "40"}], [{"_value": "20"}],
-            [{"_value": "101.5", "entity_id": "exos_router_data_received"},
-             {"_value": "9", "entity_id": "exos_router_data_sent"}],
-            [{"_time": "2026-11-09T13:49:50Z"}],
-        ])
-        store._query = lambda flux: next(replies)
-        stats = store.get_limit_stats(3, "UTC", 100)
-        assert stats["down_min"][-2] == 12.0 and stats["down_min"][-1] is None
-        assert stats["tiers"] == {50.0: 40.0, 80.0: 20.0}
-        assert stats["peak_down"] == 101.5 and stats["peak_up"] == 9.0 and stats["data_days"] > 0
+        from datetime import datetime
+        from plugins.network_monitor.network_monitor import summarize_limit, summarize_throughput
+        now = int(datetime(2026, 11, 11, 15, tzinfo=pytz.UTC).timestamp())
+        mbit = lambda m: m * 1e6 / 8 * 60  # bytes in a minute at m Mbit/s
+        down = [(now - 3600 + 60 * i, mbit(m), 60) for i, m in enumerate((120, 90, 60, 10))]
+        up = [(now - 86400 - 1800, mbit(9), 60)]  # yesterday
+        stats = summarize_limit({"down": down, "up": up}, 3, pytz.UTC, now, 100)
+        assert stats["down_min"] == [None, None, 1.0] and stats["up_min"] == [None, 0.0, None]
+        assert stats["tiers"] == {50.0: 3.0, 80.0: 2.0}
+        assert round(stats["peak_down"]) == 120 and round(stats["peak_up"]) == 9 and stats["data_days"] > 1
+        series = summarize_throughput({"down": down, "up": up}, now - 7200)
+        assert [round(v) for _, v in series["down"]] == [120, 90, 60, 10] and series["up"] == []

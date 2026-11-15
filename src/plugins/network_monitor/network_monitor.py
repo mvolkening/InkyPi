@@ -1,3 +1,4 @@
+import bisect
 import csv
 import io
 import logging
@@ -28,6 +29,14 @@ DEFAULT_USAGE_BUCKET = "homeassistant"
 USAGE_TOKEN_KEY = "INFLUXDB_HA_TOKEN"
 USAGE_ENTITY_REGEX = "exos_router_data_(received|sent)"
 USAGE_DAYS = 14
+# The router's byte counters are 32-bit and wrap at 4 GiB (a few times a day); a drop of
+# less than half the range is taken as a wrap, a bigger one as a counter reset.
+COUNTER_WRAP = 4294967296.0
+# Speed tests are left out of the usage and speed panels: they are self-inflicted traffic.
+# The router counters show a test's traffic up to ~90 s after its start (they are read
+# every 30 s and summed per minute), so a window reaches this far past the test's end.
+SPEEDTEST_TAIL_SECONDS = 120
+SPEEDTEST_DEFAULT_SECONDS = 60  # for tests logged before netmon recorded their duration
 # Window of the hourly packet loss / jitter / DNS charts.
 QUALITY_WINDOW_HOURS = 24
 # Speed tests fetched for the monthly table (6 calendar months) and the hour/weekday charts.
@@ -121,6 +130,87 @@ def _parse_int(value):
 
 def _to_rfc3339(ts):
     return datetime.utcfromtimestamp(ts).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+# Differences a cumulative byte counter, counting a 32-bit wrap as the bytes it really
+# was and a counter reset as zero.
+_COUNTER_DIFF_FLUX = (
+    '|> difference() '
+    f'|> map(fn: (r) => ({{r with _value: if r._value >= 0.0 then r._value '
+    f'else if r._value + {COUNTER_WRAP} < {COUNTER_WRAP / 2} then r._value + {COUNTER_WRAP} else 0.0}})) '
+)
+
+
+def _drop_windows(points, windows):
+    """`points` [(ts, ...)] (oldest first) without those whose ts falls in one of the
+    sorted (start, end] `windows`."""
+    if not windows:
+        return list(points)
+    starts = [w[0] for w in windows]
+    out = []
+    for point in points:
+        i = bisect.bisect_left(starts, point[0]) - 1  # last window starting before ts
+        if i >= 0 and point[0] <= windows[i][1]:
+            continue
+        out.append(point)
+    return out
+
+
+def _local_dates(now_ts, tz, days):
+    today = datetime.fromtimestamp(now_ts, tz).date()
+    return [today - timedelta(days=d) for d in range(days - 1, -1, -1)]
+
+
+def _mbps(point):
+    _ts, nbytes, seconds = point
+    return nbytes * 8.0 / max(1.0, seconds) / 1e6
+
+
+def summarize_usage(traffic, days, tz, now_ts):
+    """Bytes per local calendar day for the last `days` days (oldest first, today last):
+    {"dates": [date], "down": [bytes|None], "up": [bytes|None]}; days without data are None."""
+    dates = _local_dates(now_ts, tz, days)
+    out = {"dates": dates}
+    for key in ("down", "up"):
+        per_day = {}
+        for ts, nbytes, _seconds in traffic[key]:
+            day = datetime.fromtimestamp(ts - 1, tz).date()  # a minute is stamped with its end
+            per_day[day] = per_day.get(day, 0.0) + nbytes
+        out[key] = [per_day.get(d) for d in dates]
+    return out
+
+
+def summarize_throughput(traffic, since_ts):
+    """Per-minute speed since `since_ts`: {"down": [(ts, mbps)], "up": [...]}."""
+    return {key: [(p[0], _mbps(p)) for p in traffic[key] if p[0] > since_ts] for key in ("down", "up")}
+
+
+def summarize_limit(traffic, days, tz, now_ts, limit_mbps):
+    """How often the link ran above `limit_mbps` (and at 50% / 80% of it, download) over
+    the last `days` days: {"dates", "down_min": [minutes|None], "up_min", "tiers": {mbps: minutes},
+    "peak_down", "peak_up", "data_days"}."""
+    dates = _local_dates(now_ts, tz, days)
+    since_ts = int(tz.localize(datetime.combine(dates[0], datetime.min.time())).timestamp())
+    out = {"dates": dates, "tiers": {limit_mbps * f: 0.0 for f in (0.5, 0.8)}}
+    first_ts = None
+    for key in ("down", "up"):
+        minutes, peak = {}, 0.0
+        for point in traffic[key]:
+            if point[0] <= since_ts:
+                continue
+            first_ts = point[0] if first_ts is None else min(first_ts, point[0])
+            day = datetime.fromtimestamp(point[0] - 1, tz).date()
+            rate = _mbps(point)
+            peak = max(peak, rate)
+            minutes[day] = minutes.get(day, 0.0) + (1.0 if rate > limit_mbps else 0.0)
+            if key == "down":
+                for tier in out["tiers"]:
+                    if rate > tier:
+                        out["tiers"][tier] += 1.0
+        out[f"{key}_min"] = [minutes.get(d) for d in dates]
+        out[f"peak_{key}"] = peak
+    out["data_days"] = None if first_ts is None else (now_ts - first_ts) / 86400
+    return out
 
 
 class _InfluxStore:
@@ -308,116 +398,44 @@ class _InfluxStore:
         return {"loss": loss, "jitter": jitter, "dns_default": dns_default,
                 "dns_public": dns_public, "dns_failures": dns_failures}
 
-    def get_daily_usage(self, days, tz_name):
-        """Bytes downloaded / uploaded per local calendar day for the last `days`
-        days (oldest first, today last), from Home Assistant's cumulative router
-        byte counters. {"dates": [date], "down": [bytes|None], "up": [bytes|None]}.
-        The counters are read hourly and differenced (a reset counts as zero for
-        that hour), then summed per local day server-side."""
+    def get_speedtest_windows(self, since_ts):
+        """[(start_ts, end_ts)] of the time each speed test (passed or failed) shows in
+        the router's traffic counters, oldest first."""
+        windows = []
+        for measurement in ("speedtest", "speedtest_run"):
+            for row in self._pivoted(measurement, _to_rfc3339(since_ts)):
+                ts = _parse_influx_time(row.get("_time"))
+                if ts is None:
+                    continue
+                duration = _parse_float(row.get("duration_s")) or SPEEDTEST_DEFAULT_SECONDS
+                windows.append((ts, int(ts + duration + SPEEDTEST_TAIL_SECONDS)))
+        windows.sort()
+        return windows
+
+    def get_minute_traffic(self, since_ts, until_ts):
+        """Router traffic per minute from Home Assistant's cumulative byte counters
+        (read about every 30 s): {"down": [(ts, bytes, seconds)], "up": [...]}, oldest
+        first, ts = the minute's end, seconds = time since the previous reading (so a
+        gap in the data isn't read as a burst). One query feeds all the traffic panels."""
         rows = self._query(
-            'import "timezone"\n'
-            f'option location = timezone.location(name: "{_flux_escape(tz_name)}")\n'
-            f'from(bucket: "{_flux_escape(self.bucket)}") |> range(start: -{days + 1}d) '
+            f'from(bucket: "{_flux_escape(self.bucket)}") '
+            f'|> range(start: {_to_rfc3339(since_ts)}, stop: {_to_rfc3339(until_ts + 1)}) '
             f'|> filter(fn: (r) => r._field == "value" and r.entity_id =~ /^{USAGE_ENTITY_REGEX}$/) '
-            '|> aggregateWindow(every: 1h, fn: last, createEmpty: false) '
-            '|> difference(nonNegative: true) '
-            '|> aggregateWindow(every: 1d, fn: sum, createEmpty: true) '
-            '|> keep(columns: ["_time", "_value", "entity_id"])'
-        )
-        tz = pytz.timezone(tz_name)
-        by_day = {"down": {}, "up": {}}
-        for row in rows:
-            ts, value = _parse_influx_time(row.get("_time")), _parse_float(row.get("_value"))
-            if ts is None or value is None:
-                continue
-            # aggregateWindow stamps a window with its end, so step back into the day it covers.
-            day = datetime.fromtimestamp(ts - 3600, tz).date()
-            key = "down" if row.get("entity_id", "").endswith("received") else "up"
-            by_day[key][day] = by_day[key].get(day, 0.0) + value
-        today = datetime.now(tz).date()
-        dates = [today - timedelta(days=d) for d in range(days - 1, -1, -1)]
-        return {"dates": dates,
-                "down": [by_day["down"].get(d) for d in dates],
-                "up": [by_day["up"].get(d) for d in dates]}
-
-
-    def _rate_flux(self, range_args, direction=None):
-        """Flux building the router's throughput in Mbit/s per minute (the byte counters
-        are logged about every 30 s; a counter reset counts as zero for that minute)."""
-        entity = USAGE_ENTITY_REGEX if direction is None else f"exos_router_data_{direction}"
-        return (
-            f'from(bucket: "{_flux_escape(self.bucket)}") |> range({range_args}) '
-            f'|> filter(fn: (r) => r._field == "value" and r.entity_id =~ /^{entity}$/) '
             '|> aggregateWindow(every: 1m, fn: last, createEmpty: false) '
-            '|> derivative(unit: 1s, nonNegative: true) '
-            '|> map(fn: (r) => ({r with _value: r._value * 8.0 / 1000000.0})) '
+            '|> elapsed(unit: 1s) '
+            + _COUNTER_DIFF_FLUX
+            + '|> keep(columns: ["_time", "_value", "entity_id", "elapsed"])'
         )
-
-    def get_throughput(self, since_ts, until_ts):
-        """Per-minute actual throughput over the window: {"down": [(ts, mbps)], "up": [...]}."""
-        rows = self._query(
-            self._rate_flux(f"start: {_to_rfc3339(since_ts)}, stop: {_to_rfc3339(until_ts + 1)}")
-            + '|> keep(columns: ["_time", "_value", "entity_id"])'
-        )
-        series = {"down": [], "up": []}
+        traffic = {"down": [], "up": []}
         for row in rows:
             ts, value = _parse_influx_time(row.get("_time")), _parse_float(row.get("_value"))
-            if ts is not None and value is not None:
-                series["down" if row.get("entity_id", "").endswith("received") else "up"].append((ts, value))
-        for points in series.values():
-            points.sort()
-        return series
-
-    def get_limit_stats(self, days, tz_name, limit_mbps):
-        """How often the link ran above `limit_mbps` (and at 50% / 80% of it) in the last
-        `days` days, from per-minute throughput. Returns
-        {"dates": [date], "down_min": [minutes|None], "up_min": [...],
-         "tiers": {mbps: down minutes}, "peak_down": Mbit/s, "peak_up": Mbit/s, "data_days": float|None}."""
-        zone = (f'import "timezone"\noption location = timezone.location(name: "{_flux_escape(tz_name)}")\n')
-
-        def flagged(threshold, direction=None):
-            return (self._rate_flux(f"start: -{days}d", direction)
-                    + f'|> map(fn: (r) => ({{r with _value: if r._value > {threshold:.3f} then 1.0 else 0.0}})) ')
-
-        tz = pytz.timezone(tz_name)
-        per_day = {"down": {}, "up": {}}
-        daily = self._query(zone + flagged(limit_mbps)
-                            + '|> aggregateWindow(every: 1d, fn: sum, createEmpty: true) '
-                            '|> keep(columns: ["_time", "_value", "entity_id"])')
-        for row in daily:
-            ts, value = _parse_influx_time(row.get("_time")), _parse_float(row.get("_value"))
-            if ts is None or value is None:
+            seconds = _parse_float(row.get("elapsed"))
+            if ts is None or value is None or not seconds:
                 continue
-            day = datetime.fromtimestamp(ts - 3600, tz).date()  # window stamped with its end
-            key = "down" if row.get("entity_id", "").endswith("received") else "up"
-            per_day[key][day] = per_day[key].get(day, 0.0) + value
-
-        tiers = {}
-        for fraction in (0.5, 0.8):
-            rows = self._query(flagged(limit_mbps * fraction, "received")
-                               + '|> group() |> sum() |> keep(columns: ["_value"])')
-            tiers[limit_mbps * fraction] = (_parse_float(rows[0].get("_value")) if rows else None) or 0.0
-
-        peaks = {"down": 0.0, "up": 0.0}
-        for row in self._query(self._rate_flux(f"start: -{days}d")
-                               + '|> group(columns: ["entity_id"]) |> max() |> keep(columns: ["_value", "entity_id"])'):
-            value = _parse_float(row.get("_value"))
-            if value is not None:
-                peaks["down" if row.get("entity_id", "").endswith("received") else "up"] = value
-
-        first = self._query(
-            f'from(bucket: "{_flux_escape(self.bucket)}") |> range(start: -{days}d) '
-            f'|> filter(fn: (r) => r._field == "value" and r.entity_id =~ /^exos_router_data_received$/) '
-            '|> group() |> first() |> keep(columns: ["_time"])'
-        )
-        first_ts = _parse_influx_time(first[0].get("_time")) if first else None
-        today = datetime.now(tz).date()
-        dates = [today - timedelta(days=d) for d in range(days - 1, -1, -1)]
-        return {"dates": dates,
-                "down_min": [per_day["down"].get(d) for d in dates],
-                "up_min": [per_day["up"].get(d) for d in dates],
-                "tiers": tiers, "peak_down": peaks["down"], "peak_up": peaks["up"],
-                "data_days": None if first_ts is None else (time.time() - first_ts) / 86400}
+            traffic["down" if row.get("entity_id", "").endswith("received") else "up"].append((ts, value, seconds))
+        for points in traffic.values():
+            points.sort()
+        return traffic
 
 
 class NetworkMonitor(BasePlugin):
@@ -492,10 +510,10 @@ class NetworkMonitor(BasePlugin):
             # One query feeds the monthly speed-test table.
             all_tests = store.get_speedtests(now_ts - MONTHLY_HISTORY_DAYS * 86400)
 
-            usage = self._load_usage(settings, device_config, influx_url, influx_org, raw_bucket, verify_ssl, timezone_name)
-            self._draw_left_column(draw, left_box, now_ts, tz, fonts, min_outage_seconds, time_format, speed_max, all_tests, usage)
             traffic = self._load_traffic(settings, device_config, influx_url, influx_org, raw_bucket, verify_ssl,
-                                         timezone_name, now_ts, limit_mbps)
+                                         tz, now_ts, limit_mbps, store)
+            usage = traffic["usage"] if traffic else None
+            self._draw_left_column(draw, left_box, now_ts, tz, fonts, min_outage_seconds, time_format, speed_max, all_tests, usage)
             self._draw_throughput_panel(draw, speed_box, traffic, now_ts, tz, fonts, time_format, limit_mbps)
             self._draw_limit_panel(draw, limit_box, traffic, fonts, limit_mbps)
         except InfluxQueryError as e:
@@ -505,34 +523,27 @@ class NetworkMonitor(BasePlugin):
         return image
 
     @staticmethod
-    def _load_usage(settings, device_config, url, org, raw_bucket, verify_ssl, tz_name):
-        """Daily usage for the optional panel, or None when it isn't configured or
-        can't be read (a missing panel must never stop the rest of the display)."""
+    def _load_traffic(settings, device_config, url, org, raw_bucket, verify_ssl, tz, now_ts, limit_mbps, store):
+        """Daily usage (last USAGE_DAYS), actual throughput (last THROUGHPUT_HOURS) and
+        time-above-limit stats (last LIMIT_DAYS) from the router byte counters, with speed
+        tests left out (they are self-inflicted traffic), or None when unavailable: a
+        missing panel must never stop the rest of the display."""
         token = device_config.load_env_key(USAGE_TOKEN_KEY)
         if not token:
             return None
         bucket = (settings.get("usageBucket") or "").strip() or DEFAULT_USAGE_BUCKET
+        days = max(LIMIT_DAYS, USAGE_DAYS)
+        since_ts = now_ts - days * 86400 - 2 * 3600  # local midnight `days` days ago is within this
         try:
-            return _InfluxStore(url, org, token, raw_bucket, bucket, verify_ssl).get_daily_usage(USAGE_DAYS, tz_name)
+            windows = store.get_speedtest_windows(since_ts - 3600)
+            raw = _InfluxStore(url, org, token, raw_bucket, bucket, verify_ssl).get_minute_traffic(since_ts, now_ts)
         except InfluxQueryError as e:
-            logger.warning(f"Internet usage panel skipped: {e}")
+            logger.warning(f"Internet usage and speed panels skipped: {e}")
             return None
-
-    @staticmethod
-    def _load_traffic(settings, device_config, url, org, raw_bucket, verify_ssl, tz_name, now_ts, limit_mbps):
-        """Actual throughput (last 24 h) and time-above-limit stats (last 30 days) from the
-        router byte counters, or None when unavailable (never stops the rest of the display)."""
-        token = device_config.load_env_key(USAGE_TOKEN_KEY)
-        if not token:
-            return None
-        bucket = (settings.get("usageBucket") or "").strip() or DEFAULT_USAGE_BUCKET
-        store = _InfluxStore(url, org, token, raw_bucket, bucket, verify_ssl)
-        try:
-            return {"series": store.get_throughput(now_ts - THROUGHPUT_HOURS * 3600, now_ts),
-                    "limit": store.get_limit_stats(LIMIT_DAYS, tz_name, limit_mbps)}
-        except InfluxQueryError as e:
-            logger.warning(f"Throughput panels skipped: {e}")
-            return None
+        traffic = {key: _drop_windows(points, windows) for key, points in raw.items()}
+        return {"usage": summarize_usage(traffic, USAGE_DAYS, tz, now_ts),
+                "series": summarize_throughput(traffic, now_ts - THROUGHPUT_HOURS * 3600),
+                "limit": summarize_limit(traffic, LIMIT_DAYS, tz, now_ts, limit_mbps)}
 
     @staticmethod
     def _parse_limit_mbps(settings):
@@ -720,7 +731,8 @@ class NetworkMonitor(BasePlugin):
         label, small = fonts["label"], fonts["small"]
         draw.rectangle([x0, y0, x1, y1], outline=COLOR_BLACK, width=2)
         days = len(usage["dates"])
-        draw.text((x0 + pad, y0 + pad), f"Internet Usage (GB) - Last {days} Days", font=label, fill=COLOR_BLACK, anchor="la")
+        draw.text((x0 + pad, y0 + pad), f"Internet Usage (GB, without speed tests) - Last {days} Days",
+                  font=label, fill=COLOR_BLACK, anchor="la")
 
         gb = lambda values: [None if v is None else v / 1e9 for v in values]
         down, up = gb(usage["down"]), gb(usage["up"])
@@ -1041,7 +1053,8 @@ class NetworkMonitor(BasePlugin):
         lines = [
             f"Upload above {limit_mbps:g}: {self._fmt_minutes(up_total)}   |   Days hit: {days_hit} of {days_seen}",
             "   |   ".join(f"Above {mbps:g}: {self._fmt_minutes(mins)}" for mbps, mins in sorted(stats["tiers"].items())),
-            f"Fastest minute: {stats['peak_down']:.0f} down / {stats['peak_up']:.0f} up Mbit/s   |   {data_days:.1f} days of data",
+            f"Fastest minute: {stats['peak_down']:.0f} down / {stats['peak_up']:.0f} up Mbit/s   |   {data_days:.1f} days of data"
+            "   |   speed tests left out",
         ]
         for line in lines:
             while draw.textlength(line, font=small) > x1 - x0 - 2 * pad and "   |   " in line:
