@@ -52,6 +52,22 @@ def test_240v_heater_and_120v_pump_become_separate_loads():
     assert abs(sum(r[7] for r in by_load[heater["id"]]) - 4 * 2800 * 360 / 3600) < 150  # Wh
 
 
+def test_simultaneous_switch_offs_on_both_legs_are_split():
+    # Pump (leg A motor) and coffee plate (leg B) switch off within the same reading.
+    pairer = nilm.Pairer()
+    pump_on = nilm.Event(T0, 1100.0, 0.0)
+    pump_on.dqa = 950.0
+    plate_on = nilm.Event(T0 + 600, 0.0, 880.0)
+    both_off = nilm.Event(T0 + 614, -1100.0, -870.0)
+    both_off.dqa = -950.0
+    assert both_off.kind == "AB"
+    pairer.feed(pump_on)
+    pairer.feed(plate_on)
+    cycles, _ = pairer.feed(both_off)
+    assert sorted((c.kind, round(c.p), c.duration) for c in cycles) == [("A", 1100, 614), ("B", 875, 14)]
+    assert pairer.open == []
+
+
 def test_inrush_spike_is_not_a_step():
     det = nilm.EdgeDetector()
     rows = [(T0 + 2 * i, 200.0, 300.0, None, None) for i in range(20)]

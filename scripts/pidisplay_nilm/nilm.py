@@ -655,7 +655,22 @@ class Pairer:
         self.open = open_events or []
 
     def feed(self, e):
-        """Returns (cycle or None, [ON steps dropped unmatched])."""
+        """Returns ([cycles], [ON steps dropped unmatched]). Usually zero or one cycle;
+        an OFF step on both legs that matches nothing is tried as two simultaneous
+        120 V switch-offs (one per leg), which can close two cycles."""
+        cycle, dropped = self._feed(e)
+        if cycle is not None or e.dp > 0 or min(abs(e.da), abs(e.db)) < MIN_STEP_W:
+            return ([cycle] if cycle else []), dropped
+        cycles = []
+        for part in (Event(e.ts, e.da, 0.0), Event(e.ts, 0.0, e.db)):
+            part.dqa, part.dqb = (e.dqa, 0.0) if part.kind == "A" else (0.0, e.dqb)
+            match, _ = self._match(part)
+            if match is not None:
+                self.open.remove(match)
+                cycles.append(Cycle(match, part))
+        return cycles, dropped
+
+    def _feed(self, e):
         dropped = [o for o in self.open if e.ts - o.ts > MAX_ON_SECONDS]
         if dropped:
             self.open = [o for o in self.open if e.ts - o.ts <= MAX_ON_SECONDS]
@@ -670,6 +685,14 @@ class Pairer:
                     dropped.extend(dup)
             self.open.append(e)
             return None, dropped
+        best, _ = self._match(e)
+        if best is None:
+            return None, dropped
+        self.open.remove(best)
+        return Cycle(best, e), dropped
+
+    def _match(self, e):
+        """The open ON step that best matches OFF step `e`, or (None, None)."""
         best, best_score = None, None
         for o in self.open:
             if o.kind != e.kind:
@@ -681,10 +704,7 @@ class Pairer:
             score = miss + 0.5 * min(qmiss, 2.0) + (e.ts - o.ts) / MAX_ON_SECONDS
             if best_score is None or score < best_score:
                 best, best_score = o, score
-        if best is None:
-            return None, dropped
-        self.open.remove(best)
-        return Cycle(best, e), dropped
+        return best, best_score
 
 
 def load_distance(kind_a, p_a, q_a, kind_b, p_b, q_b, q_weight=1.0):
@@ -1024,15 +1044,15 @@ class Engine:
             for e in self.det.feed(s):
                 records.append(("event", e.ts, "on" if e.sign > 0 else "off", e.kind, round(e.da, 1), round(e.db, 1),
                                 round(e.dp, 1), round(e.dq, 1), int(e.settle or 0), int(bool(e.forced))))
-                cycle, _dropped = self.pairer.feed(e)
-                if cycle is None:
-                    continue
-                load = self.book.assign(cycle, self.local(cycle.start))
-                for step in (cycle.on, cycle.off):
-                    step.load_id = load["id"]
-                    records.append(("load", step.ts, "on" if step.sign > 0 else "off", step.kind, load["id"]))
-                records.append(("cycle", cycle.start, load["id"], cycle.kind, round(cycle.p, 1), round(cycle.q, 1),
-                                cycle.duration, round(cycle.energy_wh, 2), int(cycle.suspect)))
+                cycles, _dropped = self.pairer.feed(e)
+                for cycle in cycles:
+                    load = self.book.assign(cycle, self.local(cycle.start))
+                    cycle.on.load_id = cycle.off.load_id = load["id"]
+                    # The OFF step is stored as detected (a split one keeps its both-legs kind).
+                    records.append(("load", cycle.on.ts, "on", cycle.on.kind, load["id"]))
+                    records.append(("load", e.ts, "off", e.kind, load["id"]))
+                    records.append(("cycle", cycle.start, load["id"], cycle.kind, round(cycle.p, 1), round(cycle.q, 1),
+                                    cycle.duration, round(cycle.energy_wh, 2), int(cycle.suspect)))
         return records
 
     def _track_base(self, ts, total):
